@@ -83,13 +83,14 @@ load_dotenv()
 DATABASES = {
     'default': {
         'ENGINE': 'djongo',
-        'NAME': os.getenv('GLOBAL_DB_NAME'),  
+        'NAME': 'franchise',  
         'CLIENT': {
             'host': os.getenv('GLOBAL_DB_HOST'),
           
         }
     }
 }
+
 
 
 # Password validation
