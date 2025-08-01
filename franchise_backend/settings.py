@@ -83,7 +83,7 @@ load_dotenv()
 DATABASES = {
     'default': {
         'ENGINE': 'djongo',
-        'NAME': os.getenv('FRANCHISE_DB_NAME', 'franchise'),  
+        'NAME': 'franchise',  
         'CLIENT': {
             'host': os.getenv('GLOBAL_DB_HOST'),
           
