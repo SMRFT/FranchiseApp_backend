@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error - Shanmuga Franchise</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 15px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 500px;
+            text-align: center;
+        }
+        
+        .error-icon {
+            font-size: 60px;
+            color: #dc3545;
+            margin-bottom: 20px;
+        }
+        
+        .logo h1 {
+            color: #2c5aa0;
+            font-size: 28px;
+            font-weight: bold;
+            margin-bottom: 20px;
+        }
+        
+        .error-message {
+            font-size: 20px;
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        .error-box {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .contact-info {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+            font-size: 14px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <h1>Shanmuga Franchise</h1>
+        </div>
+        
+        <div class="error-icon">❌</div>
+        
+        <h2 class="error-message">Oops! Something went wrong</h2>
+        
+        <div class="error-box">
+            <p><strong>{{ error }}</strong></p>
+        </div>
+        
+        <div class="contact-info">
+            <h4 style="color: #2c5aa0;">Need Help?</h4>
+            <p>If you continue to experience issues, please contact our support team:</p>
+            <p>📧 Email: support@shanmugafranchise.com</p>
+            <p>📞 Phone: +91-XXXXXXXXXX</p>
+            <p>🕒 Support Hours: Monday - Friday, 9:00 AM - 6:00 PM</p>
+        </div>
+        
+        <div style="margin-top: 20px; font-size: 12px; color: #666;">
+            <p>&copy; 2024 Shanmuga Franchise. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>

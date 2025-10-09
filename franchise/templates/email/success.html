@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Password Set Successfully - Shanmuga Franchise</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 15px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 500px;
+            text-align: center;
+        }
+        
+        .success-icon {
+            font-size: 60px;
+            color: #28a745;
+            margin-bottom: 20px;
+        }
+        
+        .logo h1 {
+            color: #2c5aa0;
+            font-size: 28px;
+            font-weight: bold;
+            margin-bottom: 20px;
+        }
+        
+        .success-message {
+            font-size: 24px;
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        .info-box {
+            background: #d4edda;
+            color: #155724;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .franchise-info {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .next-steps {
+            text-align: left;
+            margin: 20px 0;
+        }
+        
+        .next-steps h3 {
+            color: #2c5aa0;
+            margin-bottom: 10px;
+        }
+        
+        .next-steps ul {
+            padding-left: 20px;
+        }
+        
+        .next-steps li {
+            margin-bottom: 8px;
+            color: #555;
+        }
+        
+        .contact-info {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+            font-size: 14px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <h1>Shanmuga Franchise</h1>
+        </div>
+        
+        <div class="success-icon">✅</div>
+        
+        <h2 class="success-message">Password Set Successfully!</h2>
+        
+        <div class="info-box">
+            <p><strong>{{ message }}</strong></p>
+        </div>
+        
+        <div class="franchise-info">
+            <p><strong>Your Franchise ID:</strong> {{ franchise_id }}</p>
+            <p><strong>Account Status:</strong> <span style="color: #28a745;">Active</span></p>
+        </div>
+        
+        <div class="next-steps">
+            <h3>What's Next?</h3>
+            <ul>
+                <li>Your franchise account is now active and ready to use</li>
+                <li>You can now log in to the franchise portal</li>
+                <li>Complete your profile setup</li>
+                <li>Access franchise management tools</li>
+                <li>Start managing your franchise operations</li>
+            </ul>
+        </div>
+        
+        <div class="contact-info">
+            <h4 style="color: #2c5aa0;">Need Help?</h4>
+            <p>📧 Email: support@shanmugafranchise.com</p>
+            <p>📞 Phone: +91-XXXXXXXXXX</p>
+            <p>🕒 Support Hours: Monday - Friday, 9:00 AM - 6:00 PM</p>
+        </div>
+        
+        <div style="margin-top: 20px; font-size: 12px; color: #666;">
+            <p>&copy; 2024 Shanmuga Franchise. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
