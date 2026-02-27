@@ -1,9 +1,15 @@
 from django.urls import path
 from . import views 
+from . import referral_report_views
+from . import cash_tally_views
 from .Payment import payment_views
 urlpatterns = [
     path('search-patient/', views.search_patient, name='search_patient'),
     path('registerpatientdetails/', views.register_patient, name='register_patient'),
+    path('confirm-billing/', views.confirm_billing, name='confirm_billing'),
+    path('canceltest/', views.cancel_tests, name='cancel_tests'),
+    path('test-cancel-request/', views.test_cancel_request, name='cancel_tests'),
+    # path('registration-status/', views.get_registration_status, name='get_registration_status'),
     path('test-details/', views.get_test_details, name='get_test_details'),
     path('getactivelocations/', views.get_active_franchise_locations, name='get_active_franchise_locations'),
     path('patientslist/', views.patient_list_by_date, name='patient_list_by_date'),
@@ -25,5 +31,22 @@ urlpatterns = [
     path('check-barcode-exists/', views.check_barcode_exists, name='check_barcode_exists'),
     path('registrations/', views.get_registrations_by_franchise_and_date, name='get_registrations_by_franchise_and_date'),
     path('get_test_values/', views.get_test_values, name='get_test_values'),
-    path('get_patient_by_barcode/', views.get_patient_by_barcode, name='get_patient_by_barcode')
+    path('get_patient_by_barcode/', views.get_patient_by_barcode, name='get_patient_by_barcode'),
+    path('send-whatsapp-template/', views.send_whatsapp_template, name='send_whatsapp_template'),
+    path("upload-pdf/", views.upload_pdf_to_gridfs, name="upload_pdf"),
+    path("get-file/<str:file_id>/", views.get_pdf_from_gridfs, name="get_pdf"),
+    path("reset-password/", views.reset_password_form, name="reset_password_form"),
+    path("request-password-reset/", views.request_password_reset, name="request_password_reset"),
+    path("api/confirm-reset-password/", views.confirm_reset_password, name="confirm_reset_password"),
+    path('refby/', views.refby, name='refby'),
+    path('get-wallet-balance/', views.get_wallet_balance, name='get_wallet_balance'),
+    path('due-patients/', views.get_due_patients, name='get_due_patients'),
+    path('accounts-summary/', views.get_accounts_summary, name='get_accounts_summary'),
+    path('monthly-billing-details/', views.get_monthly_billing_details, name='get_monthly_billing_details'),
+    path('accounts/export-csv/', views.export_accounts_csv, name='export_accounts_csv'),
+    path('referral-report/', referral_report_views.get_referral_report, name='get_referral_report'),
+    path('update-due-amount/', cash_tally_views.update_due_amount, name='update_due_amount'),
+    path('cash-tally/', cash_tally_views.get_cash_tally, name='get_cash_tally'),
+    path('cash-tally/export-daily/', cash_tally_views.export_daily_tally, name='export_daily_tally'),
+    path('cash-tally/export-monthly/', cash_tally_views.export_monthly_tally, name='export_monthly_tally'),
 ]
