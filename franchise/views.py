@@ -1211,74 +1211,102 @@ def sample(request):
                 return Response({"message": "No sample data found for this patient."}, status=404)
 
         elif franchise_id and (start_date_str and end_date_str or date_str):
-            # Get samples by franchise and date range
+
             try:
-                # Handle date range or single date
                 if start_date_str and end_date_str:
-                    # Date range filtering
                     start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
                     end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
-                    
-                    # Validate date range
+
                     if start_date > end_date:
                         return Response({"error": "start_date cannot be after end_date"}, status=400)
-                    
-                    # Set time range
+
                     date_from = start_date
-                    date_to = end_date + timedelta(days=1)  # Include end date
-                    
+                    date_to = end_date + timedelta(days=1)
+
                 elif date_str:
-                    # Single date filtering (backward compatibility)
                     target_date = datetime.strptime(date_str, "%Y-%m-%d")
                     date_from = target_date
                     date_to = target_date + timedelta(days=1)
-                else:
-                    return Response({
-                        "error": "Either (start_date and end_date) or date is required"
-                    }, status=400)
 
-                # Query MongoDB for samples in date range
+                # Diagnostics DB
+                diagnostics_db = client["Diagnostics"]
+                testdetails_collection = diagnostics_db["core_testdetails"]
+
                 all_samples = sample_collection.find({
                     "franchise_id": franchise_id,
                     "created_date": {"$gte": date_from, "$lt": date_to}
                 })
 
                 result_samples = []
-                for sample_doc in all_samples:
-                    testdetails_raw = sample_doc.get('testdetails', [])
+                all_test_ids = set()
+
+                # Collect test_ids
+                samples_list = list(all_samples)
+                for sample_doc in samples_list:
+                    testdetails_raw = sample_doc.get("testdetails", [])
                     if isinstance(testdetails_raw, str):
                         try:
                             testdetails = json.loads(testdetails_raw)
-                        except json.JSONDecodeError:
+                        except:
                             testdetails = []
-                    elif isinstance(testdetails_raw, list):
-                        testdetails = testdetails_raw
                     else:
-                        testdetails = []
+                        testdetails = testdetails_raw
 
-                    # Filter only 'Collected' testdetails
-                    collected_tests = [
-                        test for test in testdetails
-                        if isinstance(test, dict) and test.get('samplestatus') == 'Collected'
-                    ]
+                    for test in testdetails:
+                        if isinstance(test, dict) and test.get("test_id"):
+                            all_test_ids.add(test.get("test_id"))
+
+                # Batch fetch specimen info
+                test_docs = list(testdetails_collection.find(
+                    {"test_id": {"$in": list(all_test_ids)}},
+                    {"test_id": 1, "specimen_type": 1, "collection_container": 1, "_id": 0}
+                ))
+
+                test_map = {
+                    doc["test_id"]: {
+                        "specimen_type": doc.get("specimen_type"),
+                        "collection_container": doc.get("collection_container")
+                    }
+                    for doc in test_docs
+                }
+
+                # Enrich response
+                for sample_doc in samples_list:
+
+                    testdetails_raw = sample_doc.get("testdetails", [])
+                    if isinstance(testdetails_raw, str):
+                        try:
+                            testdetails = json.loads(testdetails_raw)
+                        except:
+                            testdetails = []
+                    else:
+                        testdetails = testdetails_raw
+
+                    collected_tests = []
+
+                    for test in testdetails:
+                        if isinstance(test, dict) and test.get("samplestatus") == "Collected":
+                            test_id = test.get("test_id")
+                            extra = test_map.get(test_id, {})
+
+                            test["specimen_type"] = extra.get("specimen_type", "N/A")
+                            test["collection_container"] = extra.get("collection_container", "N/A")
+
+                            collected_tests.append(test)
 
                     if collected_tests:
-                        sample_doc['_id'] = str(sample_doc['_id'])
-                        sample_doc['testdetails'] = collected_tests
+                        sample_doc["_id"] = str(sample_doc["_id"])
+                        sample_doc["testdetails"] = collected_tests
 
-                        # Attach patient_id from Register model using barcode
                         register_doc = register_collection.find_one({"barcode": sample_doc.get("barcode")})
                         sample_doc["patient_id"] = register_doc.get("patient_id") if register_doc else None
 
                         result_samples.append(sample_doc)
 
                 return Response(result_samples, status=200)
-                
-            except ValueError as e:
-                return Response({'error': f'Invalid date format. Use YYYY-MM-DD. {str(e)}'}, status=400)
+
             except Exception as e:
                 return Response({'error': str(e)}, status=500)
-
         else:
             return Response({
                 "error": "Missing required parameters. Provide either (barcode + franchise_id) or (franchise_id + start_date + end_date) or (franchise_id + date)"
@@ -1391,71 +1419,202 @@ def get_transferred_samples(request):
     franchise_id = request.GET.get('franchise_id')
     samplestatus = request.GET.get('samplestatus', 'Transferred')
     date_param = request.GET.get('date')
+    start_date_param = request.GET.get('start_date')
+    end_date_param = request.GET.get('end_date')
 
     if not franchise_id:
         return Response({'error': 'franchise_id is required'}, status=400)
 
+    # ─────────────────────────────────────────────
+    # MongoDB Connections
+    # ─────────────────────────────────────────────
+    try:
+        mongo_url = os.getenv("GLOBAL_DB_HOST")
+        client = MongoClient(mongo_url)
+
+        franchise_db = client["franchise"]
+        billing_collection = franchise_db['franchise_billing']
+        patient_collection = franchise_db['franchise_patient']
+
+        # ✅ NEW: Diagnostics DB
+        diagnostics_db = client["Diagnostics"]
+        testdetails_collection = diagnostics_db["core_testdetails"]
+
+    except Exception as e:
+        return Response({'error': f'MongoDB connection failed: {str(e)}'}, status=500)
+
+    # ─────────────────────────────────────────────
+    # Fetch Django Sample records
+    # ─────────────────────────────────────────────
     try:
         records = Sample.objects.filter(franchise_id=franchise_id)
     except Exception as e:
+        client.close()
         return Response({'error': str(e)}, status=500)
 
-    matched_samples = []
+    # ─────────────────────────────────────────────
+    # Date Filtering
+    # ─────────────────────────────────────────────
+    if start_date_param and end_date_param:
+        try:
+            start_dt = datetime.strptime(start_date_param, '%Y-%m-%d')
+            end_dt = datetime.strptime(end_date_param, '%Y-%m-%d')
 
-    # Optional date filtering
-    if date_param:
+            if start_dt > end_dt:
+                client.close()
+                return Response({'error': 'start_date cannot be after end_date'}, status=400)
+
+            start_aware = timezone.make_aware(datetime.combine(start_dt, datetime.min.time()))
+            end_aware = timezone.make_aware(datetime.combine(end_dt, datetime.max.time()))
+
+            records = records.filter(created_date__range=[start_aware, end_aware])
+
+        except ValueError:
+            client.close()
+            return Response({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=400)
+
+    elif date_param:
         try:
             filter_date = datetime.strptime(date_param, '%Y-%m-%d').date()
+            start_aware = timezone.make_aware(datetime.combine(filter_date, datetime.min.time()))
+            end_aware = timezone.make_aware(datetime.combine(filter_date, datetime.max.time()))
 
-            if timezone.is_aware(timezone.now()):
-                start_date = timezone.make_aware(datetime.combine(filter_date, datetime.min.time()))
-                end_date = timezone.make_aware(datetime.combine(filter_date, datetime.max.time()))
-                records = records.filter(created_date__range=[start_date, end_date])
-            else:
-                records = records.filter(created_date__date=filter_date)
+            records = records.filter(created_date__range=[start_aware, end_aware])
+
         except ValueError:
+            client.close()
             return Response({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=400)
+
+    # ─────────────────────────────────────────────
+    # Collect barcodes + test_ids
+    # ─────────────────────────────────────────────
+    barcode_tests_map = {}
+    barcode_created_date = {}
+    all_test_ids = set()
 
     for record in records:
         try:
             testdetails = record.testdetails
 
-            # Parse testdetails if stored as a JSON string
             if isinstance(testdetails, str):
-                try:
-                    testdetails = json.loads(testdetails)
-                except json.JSONDecodeError:
-                    # Attempt to fix invalid JSON
-                    fixed_json = re.sub(r'(\w+):', r'"\1":', testdetails)
-                    fixed_json = re.sub(r':\s*([A-Za-z][^",\[\]{}]*?)(?=,|\})', r': "\1"', fixed_json)
-                    fixed_json = re.sub(r':\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)', r': "\1"', fixed_json)
-                    fixed_json = re.sub(r'""([^"]*?)""', r'"\1"', fixed_json)
-                    try:
-                        testdetails = json.loads(fixed_json)
-                    except json.JSONDecodeError:
-                        continue
+                testdetails = json.loads(testdetails)
 
             if not isinstance(testdetails, list):
                 testdetails = [testdetails]
 
-            # Check for samplestatus and batch_number is null
             for test in testdetails:
                 if (
                     isinstance(test, dict) and
                     test.get('samplestatus') == samplestatus and
                     test.get('batch_number') in [None, '', 'null']
                 ):
-                    matched_samples.append({
-                        'franchise_id': record.franchise_id,
-                        'barcode': record.barcode,
-                        'testdetails': test
-                    })
+                    barcode = record.barcode
 
-        except Exception as e:
-            print(f"Error processing record {record.franchise_id}: {str(e)}")
+                    if barcode not in barcode_tests_map:
+                        barcode_tests_map[barcode] = []
+                        barcode_created_date[barcode] = record.created_date
+
+                    barcode_tests_map[barcode].append(test)
+
+                    # ✅ Collect test_id
+                    if test.get("test_id"):
+                        all_test_ids.add(test.get("test_id"))
+
+        except Exception:
             continue
 
-    return Response({'transferred_samples': matched_samples})
+    if not barcode_tests_map:
+        client.close()
+        return Response({'transferred_samples': []})
+
+    # ─────────────────────────────────────────────
+    # Fetch specimen_type & collection_container
+    # ─────────────────────────────────────────────
+    testdetails_docs = list(testdetails_collection.find(
+        {"test_id": {"$in": list(all_test_ids)}},
+        {
+            "test_id": 1,
+            "specimen_type": 1,
+            "collection_container": 1,
+            "_id": 0
+        }
+    ))
+
+    testdetails_map = {
+        doc["test_id"]: {
+            "specimen_type": doc.get("specimen_type"),
+            "collection_container": doc.get("collection_container")
+        }
+        for doc in testdetails_docs
+    }
+
+    # ─────────────────────────────────────────────
+    # Fetch Billing Data
+    # ─────────────────────────────────────────────
+    all_barcodes = list(barcode_tests_map.keys())
+
+    billing_docs = list(billing_collection.find(
+        {"barcode": {"$in": all_barcodes}},
+        {"barcode": 1, "patient_id": 1, "registrationDate": 1, "_id": 0}
+    ))
+
+    barcode_billing_map = {doc["barcode"]: doc for doc in billing_docs}
+
+    # ─────────────────────────────────────────────
+    # Fetch Patient Data
+    # ─────────────────────────────────────────────
+    all_patient_ids = list({
+        doc.get("patient_id")
+        for doc in billing_docs if doc.get("patient_id")
+    })
+
+    patient_docs = list(patient_collection.find(
+        {"patient_id": {"$in": all_patient_ids}},
+        {"patient_id": 1, "patientname": 1, "age": 1, "gender": 1, "phone": 1, "_id": 0}
+    ))
+
+    patient_id_map = {doc["patient_id"]: doc for doc in patient_docs}
+
+    # ─────────────────────────────────────────────
+    # Final Response Assembly
+    # ─────────────────────────────────────────────
+    transferred_samples = []
+
+    for barcode, tests in barcode_tests_map.items():
+
+        # ✅ Attach specimen & container into each test
+        enriched_tests = []
+        for test in tests:
+            test_id = test.get("test_id")
+            extra = testdetails_map.get(test_id, {})
+
+            test["specimen_type"] = extra.get("specimen_type", "N/A")
+            test["collection_container"] = extra.get("collection_container", "N/A")
+
+            enriched_tests.append(test)
+
+        billing = barcode_billing_map.get(barcode, {})
+        patient_id = billing.get("patient_id", "N/A")
+
+        patient = patient_id_map.get(patient_id, {})
+
+        transferred_samples.append({
+            "franchise_id": franchise_id,
+            "barcode": barcode,
+            "patient_id": patient_id,
+            "patientname": patient.get("patientname", "N/A"),
+            "age": patient.get("age", "N/A"),
+            "gender": patient.get("gender", "N/A"),
+            "phone": patient.get("phone", "N/A"),
+            "registrationDate": str(billing.get("registrationDate")),
+            "testdetails": enriched_tests
+        })
+
+    client.close()
+
+    return Response({
+        "transferred_samples": transferred_samples
+    })
      
 
 from .models import Batch
@@ -1476,8 +1635,11 @@ def batch_generation(request):
             mongo_url = os.getenv("GLOBAL_DB_HOST")
             client = MongoClient(mongo_url)
             db = client["franchise"]
+
+            diagnostics_db = client["Diagnostics"]
+            testdetails_collection = diagnostics_db["core_testdetails"]
+
             sample_collection = db['franchise_sample']
-            testdetails_collection = db['franchise_testdetails']
             franchise_collection = db['franchise_franchise']
             franchise_location_details = db['franchise_location_details']
 
