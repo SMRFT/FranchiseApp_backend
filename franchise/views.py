@@ -48,8 +48,14 @@ import gridfs
 from pymongo import MongoClient
 from rest_framework.exceptions import ValidationError
 from django.db import transaction
+
 from decimal import Decimal, InvalidOperation
+
 from bson.decimal128 import Decimal128
+
+
+
+
 
 def validate_decimal_field(value, field_name, max_digits=12, decimal_places=2):
     """
@@ -78,6 +84,9 @@ def validate_decimal_field(value, field_name, max_digits=12, decimal_places=2):
 
 
 
+
+
+
 import re
 from decimal import Decimal
 from datetime import datetime
@@ -92,7 +101,7 @@ import gridfs, os, json, traceback
 
 from .Payment.payment_models import Wallet
 
-def check_wallet_balance(franchise_id):
+def check_wallet_balance(franchise_id, new_bill_amount=Decimal("0.00")):
     try:
         wallet = Wallet.objects.get(franchise_id=franchise_id)
         wallet_balance = wallet.balance
@@ -117,9 +126,10 @@ def check_wallet_balance(franchise_id):
 
     # Ensure wallet_balance is Decimal
     wallet_balance = Decimal(str(wallet_balance))
+    new_share = clean_decimal(new_bill_amount) / Decimal('2.00')
 
-    if (wallet_balance - franchise_share) < 1000:
-        return False, "Insufficient wallet balance (below 1000)"
+    if (wallet_balance - franchise_share - new_share) < 1000:
+        return False, "Insufficient wallet balance (below 1000). Please Recharge."
     
     return True, "Sufficient balance"
 
@@ -170,10 +180,6 @@ def register_patient(request):
     data = request.data.copy()
     
     franchise_id = data.get("franchise_id")
-    if franchise_id:
-        is_allowed, msg = check_wallet_balance(franchise_id)
-        if not is_allowed:
-            return Response({"error": msg}, status=400)
 
     trf_file = request.FILES.get("trf")
     barcode_id = data.get("barcodeId")
@@ -206,8 +212,25 @@ def register_patient(request):
 
             if existing_patient:
                 patient = existing_patient
-                patient.franchise_id = data.get("franchise_id")
-                patient.save()
+                patient_data = {
+                    "patientname": data.get("patientname", patient.patientname),
+                    "age": data.get("age", patient.age),
+                    "gender": data.get("gender", patient.gender),
+                    "phoneNumber": phone or patient.phoneNumber,
+                    "email": data.get("email", patient.email),
+                    "city": data.get("city", patient.city),
+                    "area": data.get("area", patient.area),
+                    "pincode": data.get("pincode", patient.pincode),
+                    "dateOfBirth": data.get("dateOfBirth", patient.dateOfBirth),
+                    "franchise_id": data.get("franchise_id", patient.franchise_id),
+                }
+                patient_serializer = PatientSerializer(patient, data=patient_data, partial=True)
+                if not patient_serializer.is_valid():
+                    return Response(
+                        {"error": "Invalid patient data", "details": patient_serializer.errors},
+                        status=400,
+                    )
+                patient = patient_serializer.save()
             else:
                 # Generate patient ID only for new patients
                 unique_patient_id = generate_unique_patient_id()
@@ -232,6 +255,8 @@ def register_patient(request):
                     )
                 patient = patient_serializer.save()
 
+            existing_billing = Billing.objects.filter(barcode=barcode_id).first()
+
             # Handle TRF file upload
             trf_file_id = None
             if trf_file:
@@ -245,6 +270,8 @@ def register_patient(request):
                     content_type=trf_file.content_type,
                 )
                 trf_file_id = str(file_id)
+            elif existing_billing:
+                trf_file_id = existing_billing.trf_file_id
 
             # Parse registration date
             if "registrationDate" in data:
@@ -304,7 +331,13 @@ def register_patient(request):
                 "franchise_id": data.get("franchise_id"),
             }
 
-            serializer = BillingSerializer(data=register_data)
+            if existing_billing:
+                if existing_billing.billing_status == "Billed":
+                    return Response({"error": "Barcode already billed. Cannot update."}, status=400)
+                serializer = BillingSerializer(existing_billing, data=register_data, partial=True)
+            else:
+                serializer = BillingSerializer(data=register_data)
+
             if serializer.is_valid():
                 registration = serializer.save()
                 return Response(
@@ -329,6 +362,9 @@ def register_patient(request):
         )
 
 
+
+
+
 from decimal import Decimal, InvalidOperation
 
 def clean_decimal(value):
@@ -341,6 +377,7 @@ def clean_decimal(value):
         return Decimal(str(value).strip())
     except (InvalidOperation, ValueError, TypeError):
         return Decimal('0.00')
+
 
 
 from decimal import Decimal
@@ -381,6 +418,12 @@ def confirm_billing(request):
 
             if registration.billing_status == "Billed":
                 return Response({"error": "Already billed"}, status=400)
+                
+            franchise_id = registration.franchise_id
+            if franchise_id:
+                is_allowed, msg = check_wallet_balance(franchise_id, new_bill_amount=billed_amount_decimal)
+                if not is_allowed:
+                    return Response({"error": msg}, status=400)
 
             # ✅ Update Register
             registration.billed_amount = billed_amount_decimal
@@ -867,6 +910,11 @@ def check_barcode_exists(request):
         return Response({"exists": False, "valid": False, "message": "Barcode is not in any registered stock range."}, status=200)
 
 
+
+
+
+
+
 from .models import Billing, Sample # Assuming these are Django models or Mongoengine documents
 # Helper to parse date string
 def parse_date(date_str):
@@ -875,44 +923,58 @@ def parse_date(date_str):
 @csrf_exempt
 @api_view(['GET'])
 def get_patient_by_franchise_and_date(request):
-
+    """
+    Get patients by franchise with date range filtering.
+    
+    Query Parameters:
+    - franchise_id (required): Franchise ID
+    - start_date (optional): Start date in YYYY-MM-DD format
+    - end_date (optional): End date in YYYY-MM-DD format
+    - date (optional): Single date for backward compatibility
+    
+    Returns patients with pending sample collections within the date range.
+    """
     franchise_id = request.GET.get('franchise_id')
     start_date_str = request.GET.get('start_date')
     end_date_str = request.GET.get('end_date')
-    date_str = request.GET.get('date')
+    date_str = request.GET.get('date')  # For backward compatibility
 
     if not franchise_id:
         return JsonResponse({'error': 'Missing franchise_id'}, status=400)
 
     try:
-        # ─────────────────────────────
-        # Date Handling
-        # ─────────────────────────────
+        # Handle date filtering - support both date range and single date
         if start_date_str and end_date_str:
+            # Date range filtering
             start_date = parse_date(start_date_str)
             end_date = parse_date(end_date_str)
-
+            
             if not start_date or not end_date:
                 return JsonResponse({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=400)
-
+            
+            # Validate date range
             if start_date > end_date:
                 return JsonResponse({'error': 'start_date cannot be after end_date'}, status=400)
-
+            
+            # Set time range for the entire period
             date_from = start_date
-            date_to = end_date + timedelta(days=1)
-
+            date_to = end_date + timedelta(days=1)  # Include end date
+            
         elif date_str:
+            # Single date filtering (backward compatibility)
             target_date = parse_date(date_str)
             if not target_date:
                 return JsonResponse({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=400)
-
+            
             date_from = target_date
             date_to = target_date + timedelta(days=1)
+            
         else:
             return JsonResponse({
                 'error': 'Either (start_date and end_date) or date is required'
             }, status=400)
 
+        # Fetch registrations for the given date range and franchise
         registrations = Billing.objects.filter(
             franchise_id=franchise_id,
             registrationDate__gte=date_from,
@@ -922,106 +984,72 @@ def get_patient_by_franchise_and_date(request):
         if not registrations.exists():
             return JsonResponse([], safe=False)
 
-        # ─────────────────────────────
-        # MongoDB Connections
-        # ─────────────────────────────
+        # Connect to MongoDB for sample collection status
+        result = []
         mongo_url = os.getenv("GLOBAL_DB_HOST")
         client = MongoClient(mongo_url)
+        db = client["franchise"]
+        sample_collection = db["franchise_sample"]
 
-        franchise_db = client["franchise"]
-        sample_collection = franchise_db["franchise_sample"]
-
-        diagnostics_db = client["Diagnostics"]
-        testdetails_collection = diagnostics_db["core_testdetails"]
-
-        result = []
-        all_test_ids = set()
-
-        # First collect test_ids
-        for reg in registrations:
-            testdetails = reg.testdetails
-            if isinstance(testdetails, str):
-                try:
-                    testdetails = json.loads(testdetails)
-                except:
-                    testdetails = []
-
-            for test in testdetails:
-                if isinstance(test, dict) and test.get("test_id"):
-                    all_test_ids.add(test.get("test_id"))
-
-        # Batch fetch specimen data
-        test_docs = list(testdetails_collection.find(
-            {"test_id": {"$in": list(all_test_ids)}},
-            {"test_id": 1, "specimen_type": 1, "collection_container": 1, "_id": 0}
-        ))
-
-        test_map = {
-            doc["test_id"]: {
-                "specimen_type": doc.get("specimen_type"),
-                "collection_container": doc.get("collection_container")
-            }
-            for doc in test_docs
-        }
-
-        # Process registrations
         for reg in registrations:
             barcode = reg.barcode
-
+            
+            # Check if a Sample document exists for this patient and franchise
             sample_doc = sample_collection.find_one({
                 "franchise_id": franchise_id,
                 "barcode": barcode
             })
 
             should_display_patient = False
-
+            
             if sample_doc is None:
+                # No sample record yet, so all tests are pending. Display the patient.
                 should_display_patient = True
             else:
-                sample_testdetails = sample_doc.get("testdetails", [])
-                if isinstance(sample_testdetails, str):
+                # Sample record exists, check its testdetails statuses
+                sample_testdetails_str = sample_doc.get('testdetails', '[]')
+                sample_testdetails = []
+                
+                if isinstance(sample_testdetails_str, str):
                     try:
-                        sample_testdetails = json.loads(sample_testdetails)
-                    except:
-                        sample_testdetails = []
-
-                if any(test.get('samplestatus') == 'Pending'
-                       for test in sample_testdetails if isinstance(test, dict)):
+                        sample_testdetails = json.loads(sample_testdetails_str)
+                    except json.JSONDecodeError:
+                        sample_testdetails = []  # Fallback if parsing fails
+                elif isinstance(sample_testdetails_str, list):
+                    sample_testdetails = sample_testdetails_str
+                
+                # Check if any test is still 'Pending'
+                if any(test.get('samplestatus') == 'Pending' for test in sample_testdetails if isinstance(test, dict)):
                     should_display_patient = True
+                # If all are 'Collected', should_display_patient remains False
 
             if should_display_patient:
-
-                # Enrich testdetails
-                enriched_tests = []
-                reg_tests = reg.testdetails
-                if isinstance(reg_tests, str):
-                    try:
-                        reg_tests = json.loads(reg_tests)
-                    except:
-                        reg_tests = []
-
-                for test in reg_tests:
-                    if isinstance(test, dict):
-                        test_id = test.get("test_id")
-                        extra = test_map.get(test_id, {})
-                        test["specimen_type"] = extra.get("specimen_type", "N/A")
-                        test["collection_container"] = extra.get("collection_container", "N/A")
-                        enriched_tests.append(test)
-
                 result.append({
-                    'barcode': barcode,
+                    'barcode': reg.barcode,
                     'patient_id': reg.patient.patient_id if reg.patient else None,
                     'patientname': reg.patient.patientname if reg.patient else None,
                     'franchise_id': reg.franchise_id,
                     'registrationDate': reg.registrationDate.isoformat() if reg.registrationDate else None,
-                    'testdetails': enriched_tests,
+                    'testdetails': reg.testdetails,  # Original test details from Register
                 })
-
+        
+        # Close MongoDB connection
         client.close()
+        
         return JsonResponse(result, safe=False)
-
+        
     except Exception as e:
+        print(f"Error in get_patient_by_franchise_and_date: {str(e)}")
         return JsonResponse({'error': str(e)}, status=500)
+
+
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+from pymongo import MongoClient
+from datetime import datetime, timedelta
+import os
+import json
 
 
 @api_view(['GET', 'POST', 'PATCH'])
@@ -1383,6 +1411,7 @@ def sample(request):
             return Response({"message": "Sample updated successfully."}, status=status.HTTP_200_OK)
         else:
             return Response({"message": "No changes detected, sample not modified."}, status=status.HTTP_200_OK)
+
 
 
 @api_view(['GET'])
@@ -1794,103 +1823,214 @@ def batch_generation(request):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+# import requests
+# from .models import TestValue
+# from .serializers import TestValueSerializer
+# @api_view(['GET'])
+# def get_test_values(request):
+#     location_id = request.GET.get('locationId')
+#     barcode = request.GET.get('barcode')
+
+#     queryset = TestValue.objects.all()
+
+#     if location_id:
+#         queryset = queryset.filter(locationId=location_id)
+
+#     if barcode:
+#         queryset = queryset.filter(barcode=barcode)
+
+#     serializer = TestValueSerializer(queryset, many=True)
+#     return Response(serializer.data)
+
+
+
+
 import requests
-LAB_API_URL = "http://127.0.0.1:1071/_b_a_c_k_e_n_d/LIS/test-values/"
+LAB_API_URL = "http://test.shinova.in/_b_a_c_k_e_n_d/LIS/test-values/"
 @api_view(['GET'])
 def get_test_values(request):
-    franchise_id = request.GET.get('locationId')
-    date = request.GET.get('date')
-    if not franchise_id or not date:
-        return Response({"error": "franchise_id and date are required"}, status=400)
+    franchise_id = request.GET.get('franchise_id')
+    from_date_str = request.GET.get('from_date')
+    to_date_str = request.GET.get('to_date')
+    date_str = request.GET.get('date')
+    
+    if not franchise_id:
+        return Response({"error": "franchise_id is required"}, status=400)
+
     try:
-        # :white_check_mark: 1. Fetch test values from external LAB API
-        response = requests.get(
-            LAB_API_URL,
-            params={"locationId": franchise_id, "date": date}
-        )
-        response.raise_for_status()
-        test_data = response.json()
-        print(test_data)
-        # :white_check_mark: 2. Extract barcode from test_data
-        barcode = None
-        # if isinstance(test_data, dict) and "data" in test_data and isinstance(test_data["data"], list):
-        #     for item in test_data["data"]:
-        #         if "barcode" in item:
-        #             barcode = item["barcode"]
-        #             break
-        # if not barcode:
-        #     return Response({"error": "No barcode found in test data"}, status=404)
-        # :white_check_mark: 3. Connect to MongoDB and get patient_id using barcode
         mongo_url = os.getenv("GLOBAL_DB_HOST")
         client = MongoClient(mongo_url)
-        db = client["franchise"]
-        franchise_register_collection = db["franchise_register"]
-        register_data = franchise_register_collection.find_one({"barcode": barcode})
-        if not register_data:
-            return Response({"error": "No patient found with barcode: {}".format(barcode)}, status=404)
-        patient_id = register_data.get("patient_id")
-        # :mag: 3b. Get patient name from franchise_patient using patient_id
-        franchise_patient_collection = db["franchise_patient"]
-        patient_data = franchise_patient_collection.find_one({"patient_id": patient_id})
-        patient_name = patient_data.get("patientname") if patient_data else None
-        # :white_check_mark: 4. Return patient_id and test results
+        franchise_db = client["franchise"]
+        diag_db = client["Diagnostics"]
+        
+        query = {"locationId": franchise_id}
+        
+        if from_date_str and to_date_str:
+            from_date = datetime.strptime(from_date_str, "%Y-%m-%d")
+            to_date = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            query["date"] = {"$gte": from_date, "$lte": to_date}
+        elif date_str:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d")
+            query["date"] = target_date
+        else:
+            return Response({"error": "date or from_date/to_date are required"}, status=400)
+            
+        test_records = diag_db["core_testvalue"].find(query)
+        test_data_dict = {}
+        
+        for record in test_records:
+            barcode = record.get("barcode")
+            if not barcode:
+                continue
+                
+            created_date = record.get("created_date", record.get("date"))
+            
+            testdetails = record.get("testdetails")
+            if isinstance(testdetails, str):
+                try:
+                    testdetails = json.loads(testdetails)
+                except:
+                    testdetails = []
+            
+            if not isinstance(testdetails, list):
+                testdetails = []
+            
+            if barcode not in test_data_dict:
+                # Fetch patient info from franchise DB (try billing first, then register fallback)
+                billing_data = franchise_db["franchise_billing"].find_one({"barcode": barcode})
+                patient_id = billing_data.get("patient_id") if billing_data else None
+                
+                if not patient_id:
+                    register_data = franchise_db["franchise_register"].find_one({"barcode": barcode})
+                    patient_id = register_data.get("patient_id") if register_data else None
+                
+                patient_name = None
+                age = None
+                if patient_id:
+                    patient_data = franchise_db["franchise_patient"].find_one({"patient_id": patient_id})
+                    if patient_data:
+                        patient_name = patient_data.get("patientname")
+                        age = patient_data.get("age")
+                
+                test_data_dict[barcode] = {
+                    "patient_id": patient_id,
+                    "patientname": patient_name,
+                    "age": age,
+                    "locationId": record.get("locationId"),
+                    "barcode": barcode,
+                    "date": str(record.get("date").date()) if record.get("date") else None,
+                    "created_date": str(created_date),
+                    "testdetails": []
+                }
+                
+            if testdetails:
+                test_data_dict[barcode]["testdetails"].extend(testdetails)
+
+        test_data_list = list(test_data_dict.values())
         return Response({
-            "patient_id": patient_id,
-            "patientname": patient_name,
-            "barcode": barcode,
-            "test_data": test_data
+            "test_data": {"data": test_data_list}
         })
+
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return Response({"error": str(e)}, status=500)
 
-
-
-LAB_API_URL = "http://127.0.0.1:1071/_b_a_c_k_e_n_d/LIS/test-values/"
 @api_view(['GET'])
 def get_patient_by_barcode(request):
     franchise_id = request.GET.get('franchise_id')
-    date = request.GET.get('date')
-    if not franchise_id or not date:
-        return Response({"error": "franchise_id and date are required"}, status=400)
+    barcode = request.GET.get('barcode')
+    date_str = request.GET.get('date')
+    
+    if not franchise_id or not barcode:
+        return Response({"error": "franchise_id and barcode are required"}, status=400)
+        
     try:
-        # Step 1: Fetch test data from external LAB API
-        response = requests.get(
-            LAB_API_URL,
-            params={"franchise_id": franchise_id, "date": date}
-        )
-        response.raise_for_status()
-        test_data = response.json()
-        print(test_data)
-        # Step 2: Extract barcode from test_data
-        barcode = None
-        # if isinstance(test_data, dict) and "data" in test_data:
-        #     for item in test_data["data"]:
-        #         if "barcode" in item:
-        #             barcode = item["barcode"]
-        #             break
-        # if not barcode:
-        #     return Response({"error": "No barcode found in test data"}, status=404)
-        # Step 3: Connect to MongoDB and get patient data using barcode
         mongo_url = os.getenv("GLOBAL_DB_HOST")
         client = MongoClient(mongo_url)
-        db = client["franchise"]
-        register_data = db["franchise_register"].find_one({"barcode": barcode})
-        if not register_data:
+        franchise_db = client["franchise"]
+        diag_db = client["Diagnostics"]
+        
+        query = {"locationId": franchise_id, "barcode": barcode}
+        if date_str:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d")
+            pass
+
+        test_records = list(diag_db["core_testvalue"].find(query))
+        if not test_records:
             return Response({"error": f"No patient found with barcode: {barcode}"}, status=404)
-        patient_id = register_data.get("patient_id")
-        # Step 4: Fetch patient name from franchise_patient
-        patient_data = db["franchise_patient"].find_one({"patient_id": patient_id})
-        patient_name = patient_data.get("patientname") if patient_data else None
-        # Final response
+            
+        test_record = test_records[0]
+        created_date = test_record.get("created_date", test_record.get("date"))
+        
+        # Combine test details from all matching records
+        combined_testdetails = []
+        for tr in test_records:
+            td = tr.get("testdetails", [])
+            if isinstance(td, str):
+                try:
+                    td = json.loads(td)
+                except:
+                    td = []
+            if isinstance(td, list) and td:
+                for item in td:
+                    test_id = item.get("test_id")
+                    if test_id:
+                        # Find the corresponding test definition
+                        test_info = diag_db["core_test"].find_one({"test_id": test_id})
+                        if test_info:
+                            item["testname"] = test_info.get("test_name", item.get("test_name", "Unknown Test"))
+                            item["unit"] = test_info.get("unit", "")
+                            item["method"] = test_info.get("method", "")
+                            item["reference_range"] = test_info.get("reference_range", "")
+                            item["department"] = test_info.get("department", "GENERAL")
+                            item["specimen_type"] = test_info.get("specimen_type", "")
+                combined_testdetails.extend(td)
+                
+        # Fetch patient info from franchise DB (try billing first, then register fallback)
+        billing_data = franchise_db["franchise_billing"].find_one({"barcode": barcode})
+        patient_id = billing_data.get("patient_id") if billing_data else None
+        refby = billing_data.get("ref_by", "SELF") if billing_data else "SELF"
+        
+        if not patient_id:
+            register_data = franchise_db["franchise_register"].find_one({"barcode": barcode})
+            patient_id = register_data.get("patient_id") if register_data else None
+        
+        patient_name = None
+        age = None
+        gender = None
+        
+        if patient_id:
+            patient_data = franchise_db["franchise_patient"].find_one({"patient_id": patient_id})
+            if patient_data:
+                patient_name = patient_data.get("patientname")
+                age = patient_data.get("age")
+                gender = patient_data.get("gender")
+                
+        patient_details = {
+            "patient_id": patient_id,
+            "patientname": patient_name,
+            "age": age,
+            "gender": gender,
+            "refby": refby,
+            "branch": test_record.get("locationId"),
+            "barcode": barcode,
+            "date": str(test_record.get("date")),
+            "testdetails": combined_testdetails,
+        }
+            
         return Response({
             "franchise_id": franchise_id,
-            "date": date,
+            "date": str(test_record.get("date")),
             "barcode": barcode,
             "patient_id": patient_id,
             "patientname": patient_name,
-            "test_data": test_data
+            "test_data": {"data": [patient_details]}
         })
+
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return Response({"error": str(e)}, status=500)
     
 
@@ -2132,7 +2272,7 @@ def send_whatsapp_template(request):
     amount = payload.get("amount", "")
     link = payload.get("link", "")  # expected file_url from upload endpoint
     phone = payload.get("phone") or payload.get("support_phone") or payload.get("franchise_phone") or ""
-    template = payload.get("template", "franchise_bill")
+    template = payload.get("template", "franchise_bill1")
 
     # Build params in the order your WhatsApp template expects ({{1}}..{{7}})
     params_list = [name, date, time, product, amount, link, phone]
