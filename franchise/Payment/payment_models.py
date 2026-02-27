@@ -37,8 +37,11 @@ class PaymentGateway(models.Model):
     updated = models.DateTimeField(auto_now=True)
 
 from bson import ObjectId
+def generate_wallet_id():
+    return str(ObjectId())
+
 class Wallet(models.Model):
-    wallet_id = models.CharField(primary_key=True, max_length=50, default=lambda: str(ObjectId()))
+    wallet_id = models.CharField(primary_key=True, max_length=50, default=generate_wallet_id)
     franchise_id = models.CharField(max_length=100, unique=True)  # REPLACE Franchise FK
     balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     currency =  models.CharField(max_length=100, unique=True)

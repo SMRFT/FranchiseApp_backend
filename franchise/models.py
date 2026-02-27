@@ -1,43 +1,104 @@
 from django.db import models
 from django.utils import timezone
-
+from decimal import Decimal
+import json
+from bson import ObjectId
 
 class Patient(models.Model):
-    patient_id = models.CharField(max_length=20,primary_key=True)
-    patientname = models.CharField(max_length=220,blank=True, null=True)
-    dateOfBirth  = models.CharField(max_length=220,blank=True, null=True)
+    patient_id = models.CharField(max_length=20, primary_key=True)
+    patientname = models.CharField(max_length=220, blank=True, null=True)
+    dateOfBirth = models.CharField(max_length=220, blank=True, null=True)
     age = models.PositiveIntegerField(blank=True, null=True)
-    gender = models.CharField(max_length=10,blank=True, null=True)
-    phoneNumber = models.CharField(max_length=15,blank=True, null=True)
+    gender = models.CharField(max_length=10, blank=True, null=True)
+    phoneNumber = models.CharField(max_length=15, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
-    city = models.CharField(max_length=100,blank=True, null=True)
-    area = models.CharField(max_length=100,blank=True, null=True)
-    pincode = models.CharField(max_length=10,blank=True, null=True)
+    city = models.CharField(max_length=100, blank=True, null=True)
+    area = models.CharField(max_length=100, blank=True, null=True)
+    pincode = models.CharField(max_length=10, blank=True, null=True)
     franchise_id = models.CharField(max_length=100, blank=True, null=True)
     created_date = models.DateTimeField(auto_now_add=True)
     lastmodified_by = models.CharField(max_length=100, blank=True, null=True)
-    lastmodified_date = models.DateTimeField(auto_now_add=True)
+    lastmodified_date = models.DateTimeField(auto_now=True)
 
-    
-class Register(models.Model):
+class Billing(models.Model):
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="registrations")
-    barcode = models.CharField(max_length=100, unique=True, blank=True, null=True)
+    barcode = models.CharField(max_length=100, unique=True, primary_key=True)
     registrationDate = models.DateTimeField(blank=True, null=True)
     registeredBy = models.CharField(max_length=100, blank=True, null=True)
     referredDoctor = models.CharField(max_length=100, blank=True, null=True)
     trf_file_id = models.CharField(max_length=100, blank=True, null=True)
     testdetails = models.JSONField(blank=True, null=True)
-    total = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    discount = models.CharField(max_length=20, blank=True, null=True)  # Accepts '10%' or '100'
-    netAmount = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    paymentMode =models.CharField(max_length=20, blank=True, null=True) 
-    segment =models.CharField(max_length=20, blank=True, null=True) 
+    total = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True, default=Decimal('0.00'))
+    discountPercentage = models.CharField(max_length=20, blank=True, null=True)
+    discountAmount = models.CharField(max_length=20, blank=True, null=True)
+    netAmount = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True, default=Decimal('0.00'))
+    paymentMode = models.CharField(max_length=20, blank=True, null=True)
+    payments = models.JSONField(default=list, blank=True, null=True)
+    segment = models.CharField(max_length=20, blank=True, null=True)
     franchise_id = models.CharField(max_length=100, blank=True, null=True)
+    billing_status = models.CharField(
+        max_length=20, 
+        choices=[("Pending", "Pending"), ("Billed", "Billed")], 
+        default="Pending"
+    )
+    billed_amount = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True, default=Decimal('0.00'))
+    due_update_date = models.DateTimeField(blank=True, null=True)
     created_date = models.DateTimeField(auto_now_add=True)
+    lastmodified_date = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"Reg: {self.patient.patient_id} at {self.registrationDate}"
 
+class RevenueShareModel(models.Model):
+    id = models.AutoField(primary_key=True)
+    model_name = models.CharField(max_length=100)  # e.g., "Opt1"
+    rules = models.JSONField()  # Slab rules like min, max, franchise_share_percentage
+    is_active = models.BooleanField(default=True)
+    active_from = models.DateField()
+    active_till = models.DateField(null=True, blank=True)
+    created_date = models.DateTimeField(auto_now_add=True)
+    created_by = models.CharField(max_length=100)
+    lastmodified_date = models.DateTimeField(auto_now=True)
+    lastmodified_by = models.CharField(max_length=100)
+
+    def __str__(self):
+        return f"{self.model_name} - {self.is_active}"
+
+class FranchiseMonthlyRevenue(models.Model):
+    id = models.AutoField(primary_key=True)  # global auto ID
+    monthly_id = models.CharField(max_length=20, unique=True, editable=False)  
+    franchise_id = models.CharField(max_length=100)
+    year = models.IntegerField()
+    month = models.IntegerField()
+    total_revenue = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'))
+    franchise_share = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'))
+    franchiser_share = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'))
+    revenue_share_model = models.ForeignKey(RevenueShareModel, on_delete=models.SET_NULL, null=True, blank=True)
+    wallet_amount_reduced = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'))
+    registrations_refs = models.JSONField(default=list)
+    status = models.CharField(
+        max_length=10,
+        choices=[("active", "Active"), ("closed", "Closed")],
+        default="active"
+    )
+    closed_by = models.CharField(max_length=100, null=True, blank=True)
+    closed_date = models.DateTimeField(null=True, blank=True)
+    created_date = models.DateTimeField(auto_now_add=True)
+    created_by = models.CharField(max_length=100)
+    lastmodified_date = models.DateTimeField(auto_now=True)
+    lastmodified_by = models.CharField(max_length=100)
+
+    class Meta:
+        unique_together = ['franchise_id', 'year', 'month']
+
+    def save(self, *args, **kwargs):
+        # Auto-generate monthly_id if not already set
+        if not self.monthly_id:
+            self.monthly_id = f"{self.franchise_id}-{self.year}{self.month:02d}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.monthly_id} - ₹{self.total_revenue}"
 
 class Sample(models.Model):
     franchise_id = models.CharField(max_length=100)
@@ -50,7 +111,6 @@ class Sample(models.Model):
     def __str__(self):
         return f"Reg: {self.barcode} at {self.created_date}"
     
-
 class Batch(models.Model):
     batch_number = models.CharField(max_length=20, unique=True)
     franchise_id = models.CharField(max_length=100)
@@ -68,35 +128,31 @@ class Batch(models.Model):
     def __str__(self):
         return self.batch_number
     
-
-
-class FranchiseRevenueShare(models.Model):
-    min_amount = models.DecimalField(max_digits=15, decimal_places=2)
-    max_amount = models.DecimalField(max_digits=15, decimal_places=2)
-    share_percent = models.DecimalField(max_digits=6, decimal_places=2)
-    created_date = models.DateTimeField()
-    lastmodified_date = models.DateTimeField()
-
-    def __str__(self):
-        return f"{self.min_amount}-{self.max_amount}: {self.share_percent}%"
-    
-
-class FranchiseMonthlyData(models.Model):
-    franchise_id = models.CharField(max_length=100)
-    month = models.CharField(max_length=7)  # YYYY-MM
-    total_bills = models.IntegerField(default=0)
-    total_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    franchise_share = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    franchiser_share = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
-    created_date = models.DateTimeField(auto_now_add=True)
-    updated_date = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        unique_together = ('franchise_id', 'month')
-
-
 class TestValue(models.Model):
     date = models.DateField()
     barcode = models.CharField(max_length=100)
     locationId = models.CharField(max_length=100)
     testdetails = models.TextField()
+
+class RefBy(models.Model):
+    name = models.CharField(max_length=255)
+    qualification = models.CharField(max_length=255, blank=True, null=True)
+    specialization = models.CharField(max_length=255, blank=True, null=True)
+    email = models.CharField(max_length=255, blank=True, null=True)
+    phone = models.CharField(max_length=255, blank=True, null=True)
+    created_date = models.DateTimeField(auto_now_add=True)
+    lastmodified_date = models.DateTimeField(auto_now=True)
+    franchise_id = models.CharField(max_length=100)
+    def __str__(self):
+        return f"{self.name}"
+
+class PaymentTransaction(models.Model):
+    franchise_id = models.CharField(max_length=100)
+    barcode = models.CharField(max_length=100) # Link to Billing via barcode
+    amount_paid = models.DecimalField(max_digits=12, decimal_places=2)
+    payment_date = models.DateTimeField(auto_now_add=True)
+    payment_mode = models.CharField(max_length=50, blank=True, null=True) # Cash, UPI, etc.
+    remarks = models.CharField(max_length=255, blank=True, null=True) # e.g., "Due Clearance", "Initial Payment"
+    
+    def __str__(self):
+        return f"{self.barcode} - {self.amount_paid} on {self.payment_date}"
