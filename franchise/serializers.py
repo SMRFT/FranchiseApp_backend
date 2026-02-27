@@ -14,18 +14,33 @@ class PatientSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-from .models import Register
-class RegisterSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Register
-        fields = '__all__'
+from .models import Billing
+from rest_framework import serializers
+from decimal import Decimal, InvalidOperation
 
+from rest_framework import serializers
+
+class BillingSerializer(serializers.ModelSerializer):
+    total = serializers.DecimalField(max_digits=12, decimal_places=2)
+    netAmount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    
+    class Meta:
+        model = Billing
+        fields = '__all__'
 
 from .models import Sample
 class SampleSerializer(serializers.ModelSerializer):
     id = ObjectIdField(read_only=True)
     class Meta:
         model = Sample
+        fields = '__all__'
+
+        
+from .models import RefBy
+class RefBySerializer(serializers.ModelSerializer):
+    id = ObjectIdField(read_only=True)
+    class Meta:
+        model = RefBy
         fields = '__all__'
 
 

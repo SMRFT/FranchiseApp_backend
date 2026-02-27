@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Password Reset Successful</title>
+    <style>
+        body {
+            font-family: "Segoe UI", sans-serif;
+            background: #ecfdf5;
+            margin: 0;
+            padding: 0;
+        }
+        .box {
+            max-width: 480px;
+            margin: 60px auto;
+            background: #ffffff;
+            border-radius: 10px;
+            padding: 30px 25px;
+            box-shadow: 0 4px 18px rgba(0,0,0,0.05);
+            text-align: center;
+        }
+        h2 {
+            color: #16a34a;
+            font-size: 22px;
+            margin-bottom: 10px;
+        }
+        p {
+            color: #4b5563;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+<div class="box">
+    <h2>✅ Password Updated</h2>
+    <p>Your password has been reset successfully for franchise ID <strong>{{ franchise_id }}</strong>.</p>
+    {% if email %}
+    <p>Account email: <strong>{{ email }}</strong></p>
+    {% endif %}
+    <p>You can now close this window and log in with your new password.</p>
+</div>
+</body>
+</html>
