@@ -75,4 +75,3 @@ def get_referral_report(request):
 
     except Exception as e:
         return Response({"error": str(e)}, status=500)
-
