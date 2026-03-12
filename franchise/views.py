@@ -910,11 +910,6 @@ def check_barcode_exists(request):
         return Response({"exists": False, "valid": False, "message": "Barcode is not in any registered stock range."}, status=200)
 
 
-
-
-
-
-
 from .models import Billing, Sample # Assuming these are Django models or Mongoengine documents
 # Helper to parse date string
 def parse_date(date_str):
@@ -923,58 +918,48 @@ def parse_date(date_str):
 @csrf_exempt
 @api_view(['GET'])
 def get_patient_by_franchise_and_date(request):
-    """
-    Get patients by franchise with date range filtering.
-    
-    Query Parameters:
-    - franchise_id (required): Franchise ID
-    - start_date (optional): Start date in YYYY-MM-DD format
-    - end_date (optional): End date in YYYY-MM-DD format
-    - date (optional): Single date for backward compatibility
-    
-    Returns patients with pending sample collections within the date range.
-    """
+
     franchise_id = request.GET.get('franchise_id')
     start_date_str = request.GET.get('start_date')
     end_date_str = request.GET.get('end_date')
-    date_str = request.GET.get('date')  # For backward compatibility
+    date_str = request.GET.get('date')
 
     if not franchise_id:
         return JsonResponse({'error': 'Missing franchise_id'}, status=400)
 
     try:
-        # Handle date filtering - support both date range and single date
+        # ─────────────────────────────
+        # Date Handling
+        # ─────────────────────────────
         if start_date_str and end_date_str:
-            # Date range filtering
             start_date = parse_date(start_date_str)
             end_date = parse_date(end_date_str)
-            
+
             if not start_date or not end_date:
                 return JsonResponse({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=400)
-            
-            # Validate date range
+
             if start_date > end_date:
                 return JsonResponse({'error': 'start_date cannot be after end_date'}, status=400)
-            
-            # Set time range for the entire period
+
             date_from = start_date
-            date_to = end_date + timedelta(days=1)  # Include end date
-            
+            date_to = end_date + timedelta(days=1)
+
         elif date_str:
-            # Single date filtering (backward compatibility)
             target_date = parse_date(date_str)
             if not target_date:
                 return JsonResponse({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=400)
-            
+
             date_from = target_date
             date_to = target_date + timedelta(days=1)
-            
+
         else:
             return JsonResponse({
                 'error': 'Either (start_date and end_date) or date is required'
             }, status=400)
 
-        # Fetch registrations for the given date range and franchise
+        # ─────────────────────────────
+        # Fetch Billing Records
+        # ─────────────────────────────
         registrations = Billing.objects.filter(
             franchise_id=franchise_id,
             registrationDate__gte=date_from,
@@ -984,73 +969,144 @@ def get_patient_by_franchise_and_date(request):
         if not registrations.exists():
             return JsonResponse([], safe=False)
 
-        # Connect to MongoDB for sample collection status
-        result = []
+        # ─────────────────────────────
+        # MongoDB Connections
+        # ─────────────────────────────
         mongo_url = os.getenv("GLOBAL_DB_HOST")
         client = MongoClient(mongo_url)
-        db = client["franchise"]
-        sample_collection = db["franchise_sample"]
 
+        franchise_db = client["franchise"]
+        sample_collection = franchise_db["franchise_sample"]
+
+        diagnostics_db = client["Diagnostics"]
+        testdetails_collection = diagnostics_db["core_testdetails"]
+
+        result = []
+        all_test_ids = set()
+        all_barcodes = [reg.barcode for reg in registrations if reg.barcode]
+
+        # ─────────────────────────────
+        # Collect All Test IDs
+        # ─────────────────────────────
         for reg in registrations:
-            barcode = reg.barcode
-            
-            # Check if a Sample document exists for this patient and franchise
-            sample_doc = sample_collection.find_one({
+            testdetails = reg.testdetails
+
+            if isinstance(testdetails, str):
+                try:
+                    testdetails = json.loads(testdetails)
+                except:
+                    testdetails = []
+
+            for test in testdetails:
+                if isinstance(test, dict) and test.get("test_id"):
+                    all_test_ids.add(test.get("test_id"))
+
+        # ─────────────────────────────
+        # Fetch Test Metadata
+        # ─────────────────────────────
+        test_docs = list(testdetails_collection.find(
+            {"test_id": {"$in": list(all_test_ids)}},
+            {"test_id": 1, "specimen_type": 1, "collection_container": 1, "_id": 0}
+        ))
+
+        test_map = {
+            doc["test_id"]: {
+                "specimen_type": doc.get("specimen_type"),
+                "collection_container": doc.get("collection_container")
+            }
+            for doc in test_docs
+        }
+
+        # ─────────────────────────────
+        # Fetch Sample Documents
+        # ─────────────────────────────
+        sample_docs = list(sample_collection.find(
+            {
                 "franchise_id": franchise_id,
-                "barcode": barcode
+                "barcode": {"$in": all_barcodes}
+            }
+        ))
+
+        sample_map = {
+            doc["barcode"]: doc
+            for doc in sample_docs
+        }
+
+        # ─────────────────────────────
+        # Process Registrations
+        # ─────────────────────────────
+        for reg in registrations:
+
+            barcode = reg.barcode
+            sample_doc = sample_map.get(barcode)
+
+            # DEFAULT: do not show
+            should_display_patient = False
+
+            # ✅ Case 1: No sample saved → show
+            if not sample_doc:
+                should_display_patient = True
+
+            else:
+                sample_testdetails = sample_doc.get("testdetails", [])
+
+                if isinstance(sample_testdetails, str):
+                    try:
+                        sample_testdetails = json.loads(sample_testdetails)
+                    except:
+                        sample_testdetails = []
+
+                statuses = [
+                    test.get("samplestatus")
+                    for test in sample_testdetails
+                    if isinstance(test, dict)
+                ]
+
+                # ✅ Show only if at least one Pending
+                if "Pending" in statuses:
+                    should_display_patient = True
+
+            if not should_display_patient:
+                continue
+
+            # ─────────────────────────────
+            # Enrich Test Details
+            # ─────────────────────────────
+            enriched_tests = []
+            reg_tests = reg.testdetails
+
+            if isinstance(reg_tests, str):
+                try:
+                    reg_tests = json.loads(reg_tests)
+                except:
+                    reg_tests = []
+
+            for test in reg_tests:
+                if isinstance(test, dict):
+                    test_id = test.get("test_id")
+                    extra = test_map.get(test_id, {})
+
+                    enriched_tests.append({
+                        **test,
+                        "specimen_type": extra.get("specimen_type", "N/A"),
+                        "collection_container": extra.get("collection_container", "N/A"),
+                    })
+
+            result.append({
+                'barcode': barcode,
+                'patient_id': reg.patient.patient_id if reg.patient else None,
+                'patientname': reg.patient.patientname if reg.patient else None,
+                'franchise_id': reg.franchise_id,
+                'registrationDate': reg.registrationDate.isoformat() if reg.registrationDate else None,
+                'testdetails': enriched_tests,
             })
 
-            should_display_patient = False
-            
-            if sample_doc is None:
-                # No sample record yet, so all tests are pending. Display the patient.
-                should_display_patient = True
-            else:
-                # Sample record exists, check its testdetails statuses
-                sample_testdetails_str = sample_doc.get('testdetails', '[]')
-                sample_testdetails = []
-                
-                if isinstance(sample_testdetails_str, str):
-                    try:
-                        sample_testdetails = json.loads(sample_testdetails_str)
-                    except json.JSONDecodeError:
-                        sample_testdetails = []  # Fallback if parsing fails
-                elif isinstance(sample_testdetails_str, list):
-                    sample_testdetails = sample_testdetails_str
-                
-                # Check if any test is still 'Pending'
-                if any(test.get('samplestatus') == 'Pending' for test in sample_testdetails if isinstance(test, dict)):
-                    should_display_patient = True
-                # If all are 'Collected', should_display_patient remains False
-
-            if should_display_patient:
-                result.append({
-                    'barcode': reg.barcode,
-                    'patient_id': reg.patient.patient_id if reg.patient else None,
-                    'patientname': reg.patient.patientname if reg.patient else None,
-                    'franchise_id': reg.franchise_id,
-                    'registrationDate': reg.registrationDate.isoformat() if reg.registrationDate else None,
-                    'testdetails': reg.testdetails,  # Original test details from Register
-                })
-        
-        # Close MongoDB connection
         client.close()
-        
         return JsonResponse(result, safe=False)
-        
+
     except Exception as e:
-        print(f"Error in get_patient_by_franchise_and_date: {str(e)}")
         return JsonResponse({'error': str(e)}, status=500)
-
-
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from rest_framework import status
-from pymongo import MongoClient
-from datetime import datetime, timedelta
-import os
-import json
-
+    
 
 @api_view(['GET', 'POST', 'PATCH'])
 def sample(request):
@@ -1411,7 +1467,6 @@ def sample(request):
             return Response({"message": "Sample updated successfully."}, status=status.HTTP_200_OK)
         else:
             return Response({"message": "No changes detected, sample not modified."}, status=status.HTTP_200_OK)
-
 
 
 @api_view(['GET'])
@@ -1821,218 +1876,339 @@ def batch_generation(request):
             import traceback
             traceback.print_exc()
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-# import requests
-# from .models import TestValue
-# from .serializers import TestValueSerializer
-# @api_view(['GET'])
-# def get_test_values(request):
-#     location_id = request.GET.get('locationId')
-#     barcode = request.GET.get('barcode')
-
-#     queryset = TestValue.objects.all()
-
-#     if location_id:
-#         queryset = queryset.filter(locationId=location_id)
-
-#     if barcode:
-#         queryset = queryset.filter(barcode=barcode)
-
-#     serializer = TestValueSerializer(queryset, many=True)
-#     return Response(serializer.data)
-
-
-
+        
 
 import requests
-LAB_API_URL = "http://test.shinova.in/_b_a_c_k_e_n_d/LIS/test-values/"
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+
+LAB_API_URL = "http://127.0.0.1:1071/_b_a_c_k_e_n_d/LIS/get_test_value_for_franchise/"
+
 @api_view(['GET'])
 def get_test_values(request):
-    franchise_id = request.GET.get('franchise_id')
-    from_date_str = request.GET.get('from_date')
-    to_date_str = request.GET.get('to_date')
-    date_str = request.GET.get('date')
-    
-    if not franchise_id:
-        return Response({"error": "franchise_id is required"}, status=400)
+
+    franchise_id = request.GET.get("franchise_id")
+    from_date = request.GET.get("from_date")
+    to_date = request.GET.get("to_date")
+
+    if not franchise_id or not from_date or not to_date:
+        return Response({"error": "Missing parameters"}, status=400)
 
     try:
-        mongo_url = os.getenv("GLOBAL_DB_HOST")
-        client = MongoClient(mongo_url)
-        franchise_db = client["franchise"]
-        diag_db = client["Diagnostics"]
-        
-        query = {"locationId": franchise_id}
-        
-        if from_date_str and to_date_str:
-            from_date = datetime.strptime(from_date_str, "%Y-%m-%d")
-            to_date = datetime.strptime(to_date_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-            query["date"] = {"$gte": from_date, "$lte": to_date}
-        elif date_str:
-            target_date = datetime.strptime(date_str, "%Y-%m-%d")
-            query["date"] = target_date
-        else:
-            return Response({"error": "date or from_date/to_date are required"}, status=400)
-            
-        test_records = diag_db["core_testvalue"].find(query)
-        test_data_dict = {}
-        
-        for record in test_records:
-            barcode = record.get("barcode")
+        response = requests.get(
+            LAB_API_URL,
+            params={"franchise_id": franchise_id, "from_date": from_date, "to_date": to_date},
+            timeout=20
+        )
+        response.raise_for_status()
+        lab_data = response.json()
+        test_data = lab_data.get("data", [])
+
+        if not test_data:
+            return Response({"status": "success", "data": []}, status=200)
+
+        # ✅ Group everything by barcode
+        grouped = {}
+
+        for item in test_data:
+            barcode = item.get("barcode")
             if not barcode:
                 continue
-                
-            created_date = record.get("created_date", record.get("date"))
-            
-            testdetails = record.get("testdetails")
-            if isinstance(testdetails, str):
-                try:
-                    testdetails = json.loads(testdetails)
-                except:
-                    testdetails = []
-            
-            if not isinstance(testdetails, list):
-                testdetails = []
-            
-            if barcode not in test_data_dict:
-                # Fetch patient info from franchise DB (try billing first, then register fallback)
-                billing_data = franchise_db["franchise_billing"].find_one({"barcode": barcode})
-                patient_id = billing_data.get("patient_id") if billing_data else None
-                
-                if not patient_id:
-                    register_data = franchise_db["franchise_register"].find_one({"barcode": barcode})
-                    patient_id = register_data.get("patient_id") if register_data else None
-                
-                patient_name = None
-                age = None
-                if patient_id:
-                    patient_data = franchise_db["franchise_patient"].find_one({"patient_id": patient_id})
-                    if patient_data:
-                        patient_name = patient_data.get("patientname")
-                        age = patient_data.get("age")
-                
-                test_data_dict[barcode] = {
-                    "patient_id": patient_id,
-                    "patientname": patient_name,
-                    "age": age,
-                    "locationId": record.get("locationId"),
-                    "barcode": barcode,
-                    "date": str(record.get("date").date()) if record.get("date") else None,
-                    "created_date": str(created_date),
-                    "testdetails": []
-                }
-                
-            if testdetails:
-                test_data_dict[barcode]["testdetails"].extend(testdetails)
 
-        test_data_list = list(test_data_dict.values())
+            billing = Billing.objects.filter(barcode=barcode).first()
+            if not billing:
+                continue
+
+            patient = Patient.objects.filter(patient_id=billing.patient_id).first()
+            if not patient:
+                continue
+
+            if barcode not in grouped:
+                grouped[barcode] = {
+                    "barcode": barcode,
+                    "date": item.get("date"),
+                    "patient_id": patient.patient_id,
+                    "patientname": getattr(patient, "patientname", ""),
+                    "phone": getattr(patient, "phone", ""),
+                    "age": getattr(patient, "age", ""),
+                    "gender": getattr(patient, "gender", ""),
+                    "address": getattr(patient, "address", ""),
+                    # ✅ Collect all testdetails across rows
+                    "testdetails": item.get("testdetails") or [],
+                }
+            else:
+                # Merge testdetails from additional rows for same barcode
+                incoming = item.get("testdetails") or []
+                grouped[barcode]["testdetails"].extend(incoming)
+
         return Response({
-            "test_data": {"data": test_data_list}
-        })
+            "status": "success",
+            "data": list(grouped.values())
+        }, status=200)
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return Response({"error": str(e)}, status=500)
+    
+
+# =====================================================
+# ✅ GET PATIENT BY BARCODE (SHF ONLY)
+# =====================================================
+import os
+from datetime import datetime
+import requests
+from pymongo import MongoClient
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+
+LAB_API_URL = "https://test.shinova.in/_b_a_c_k_e_n_d/LIS/get_test_value_for_franchise/"
 
 @api_view(['GET'])
 def get_patient_by_barcode(request):
+
     franchise_id = request.GET.get('franchise_id')
+    date = request.GET.get('date')
     barcode = request.GET.get('barcode')
-    date_str = request.GET.get('date')
-    
-    if not franchise_id or not barcode:
-        return Response({"error": "franchise_id and barcode are required"}, status=400)
-        
+
+    if not franchise_id or not date or not barcode:
+        return Response(
+            {"error": "franchise_id, date, and barcode are required"},
+            status=400
+        )
+
+    if not franchise_id.upper().startswith("SHF"):
+        return Response(
+            {"error": "Invalid franchise_id. Only SHF locations allowed."},
+            status=400
+        )
+
     try:
+        import json
+
         mongo_url = os.getenv("GLOBAL_DB_HOST")
         client = MongoClient(mongo_url)
-        franchise_db = client["franchise"]
-        diag_db = client["Diagnostics"]
-        
-        query = {"locationId": franchise_id, "barcode": barcode}
-        if date_str:
-            target_date = datetime.strptime(date_str, "%Y-%m-%d")
-            pass
 
-        test_records = list(diag_db["core_testvalue"].find(query))
-        if not test_records:
-            return Response({"error": f"No patient found with barcode: {barcode}"}, status=404)
-            
-        test_record = test_records[0]
-        created_date = test_record.get("created_date", test_record.get("date"))
-        
-        # Combine test details from all matching records
-        combined_testdetails = []
-        for tr in test_records:
-            td = tr.get("testdetails", [])
-            if isinstance(td, str):
-                try:
-                    td = json.loads(td)
-                except:
-                    td = []
-            if isinstance(td, list) and td:
-                for item in td:
-                    test_id = item.get("test_id")
-                    if test_id:
-                        # Find the corresponding test definition
-                        test_info = diag_db["core_test"].find_one({"test_id": test_id})
-                        if test_info:
-                            item["testname"] = test_info.get("test_name", item.get("test_name", "Unknown Test"))
-                            item["unit"] = test_info.get("unit", "")
-                            item["method"] = test_info.get("method", "")
-                            item["reference_range"] = test_info.get("reference_range", "")
-                            item["department"] = test_info.get("department", "GENERAL")
-                            item["specimen_type"] = test_info.get("specimen_type", "")
-                combined_testdetails.extend(td)
-                
-        # Fetch patient info from franchise DB (try billing first, then register fallback)
-        billing_data = franchise_db["franchise_billing"].find_one({"barcode": barcode})
-        patient_id = billing_data.get("patient_id") if billing_data else None
-        refby = billing_data.get("ref_by", "SELF") if billing_data else "SELF"
-        
-        if not patient_id:
-            register_data = franchise_db["franchise_register"].find_one({"barcode": barcode})
-            patient_id = register_data.get("patient_id") if register_data else None
-        
-        patient_name = None
-        age = None
-        gender = None
-        
-        if patient_id:
-            patient_data = franchise_db["franchise_patient"].find_one({"patient_id": patient_id})
-            if patient_data:
-                patient_name = patient_data.get("patientname")
-                age = patient_data.get("age")
-                gender = patient_data.get("gender")
-                
-        patient_details = {
-            "patient_id": patient_id,
-            "patientname": patient_name,
-            "age": age,
-            "gender": gender,
-            "refby": refby,
-            "branch": test_record.get("locationId"),
-            "barcode": barcode,
-            "date": str(test_record.get("date")),
-            "testdetails": combined_testdetails,
-        }
-            
+        # ===============================
+        # 1️⃣ FETCH FROM EXTERNAL LAB API
+        # ===============================
+        lab_response = requests.get(
+            LAB_API_URL,
+            params={
+                "franchise_id": franchise_id,
+                "from_date": date,
+                "to_date": date,
+            },
+            timeout=20
+        )
+        lab_response.raise_for_status()
+        lab_data = lab_response.json()
+        test_data = lab_data.get("data", [])
+
+        # ✅ Get ALL rows matching this barcode
+        api_matched_rows = [
+            item for item in test_data if str(item.get("barcode")) == str(barcode)
+        ]
+
+        # ✅ Merge testdetails from ALL matching rows
+        api_testdetails = []
+        for item in api_matched_rows:
+            raw = item.get("testdetails", [])
+            if isinstance(raw, str):
+                parsed = json.loads(raw)
+            elif isinstance(raw, list):
+                parsed = raw
+            else:
+                parsed = []
+            api_testdetails.extend(parsed)
+
+        # ===============================
+        # 2️⃣ FETCH FROM MONGODB franchise DB
+        # ===============================
+        franchise_db = client["franchise"]
+
+        # ✅ Get ALL mongo records for this barcode (find vs find_one)
+        mongo_records = list(franchise_db["franchise_register"].find(
+            {"barcode": barcode, "locationId": franchise_id},
+            {"_id": 0}
+        ))
+
+        mongo_testdetails = []
+        mongo_register = None
+        for record in mongo_records:
+            if not mongo_register:
+                mongo_register = record  # Keep first record for date reference
+            raw = record.get("testdetails", "[]")
+            if isinstance(raw, str):
+                parsed = json.loads(raw)
+            elif isinstance(raw, list):
+                parsed = raw
+            else:
+                parsed = []
+            mongo_testdetails.extend(parsed)
+
+        # ✅ Merge both sources by test_id (avoid duplicates)
+        merged_map = {}
+        for td in api_testdetails:
+            merged_map[td.get("test_id")] = td
+        for td in mongo_testdetails:
+            tid = td.get("test_id")
+            if tid in merged_map:
+                merged_map[tid] = {**merged_map[tid], **td}
+            else:
+                merged_map[tid] = td
+
+        all_testdetails = list(merged_map.values())
+
+        if not all_testdetails:
+            return Response(
+                {"error": f"No test details found for barcode: {barcode}"},
+                status=404
+            )
+
+        # ===============================
+        # 3️⃣ ENRICH EACH TEST FROM MongoDB Diagnostics
+        # ===============================
+        diagnostics_db = client["Diagnostics"]
+        core_tests = diagnostics_db["core_testdetails"]
+
+        enriched_testdetails = []
+        for td in all_testdetails:
+            test_id   = td.get("test_id")
+            device_id = td.get("device_id", "N/A")
+
+            mongo_test = core_tests.find_one({"test_id": test_id}, {"_id": 0})
+
+            # ✅ Build enriched parameters
+            enriched_parameters = []
+
+            # Parameters with values come from mongo register (franchise_register.testdetails[].parameters)
+            register_params = td.get("parameters", [])  # list of {name, value, unit, specimen_type, reference_range, method, sub_title}
+
+            if mongo_test and mongo_test.get("parameters"):
+                core_params_by_device = mongo_test["parameters"]
+
+                # ✅ Pick the right device's parameter definitions
+                # Try exact device_id match first, fallback to first available device
+                if isinstance(core_params_by_device, dict):
+                    core_param_list = (
+                        core_params_by_device.get(device_id)
+                        or next(iter(core_params_by_device.values()), [])
+                    )
+                else:
+                    core_param_list = []
+
+                # Build a lookup of core param definitions by test_name
+                core_param_map = {p["test_name"]: p for p in core_param_list}
+
+                if register_params:
+                    # ✅ Register has values — merge with core definitions
+                    for rp in register_params:
+                        param_name = rp.get("name", "")
+                        core_def   = core_param_map.get(param_name, {})
+
+                        enriched_parameters.append({
+                            "name":            param_name,
+                            "value":           rp.get("value"),
+                            "unit":            rp.get("unit")            or core_def.get("unit"),
+                            "specimen_type":   rp.get("specimen_type")   or core_def.get("specimen_type") or mongo_test.get("specimen_type"),
+                            "reference_range": rp.get("reference_range") or core_def.get("reference_range"),
+                            "method":          rp.get("method")          or core_def.get("method"),
+                            "sub_title":       rp.get("sub_title", ""),
+                            "test_code":       core_def.get("test_code", ""),
+                        })
+                else:
+                    # ✅ No register params — use core definitions only (no values)
+                    for core_p in core_param_list:
+                        enriched_parameters.append({
+                            "name":            core_p.get("test_name", ""),
+                            "value":           None,
+                            "unit":            core_p.get("unit"),
+                            "specimen_type":   core_p.get("specimen_type") or mongo_test.get("specimen_type"),
+                            "reference_range": core_p.get("reference_range"),
+                            "method":          core_p.get("method"),
+                            "sub_title":       "",
+                            "test_code":       core_p.get("test_code", ""),
+                        })
+            else:
+                # ✅ No core params — just use register params as-is if present
+                for rp in register_params:
+                    enriched_parameters.append({
+                        "name":            rp.get("name", ""),
+                        "value":           rp.get("value"),
+                        "unit":            rp.get("unit"),
+                        "specimen_type":   rp.get("specimen_type"),
+                        "reference_range": rp.get("reference_range"),
+                        "method":          rp.get("method"),
+                        "sub_title":       rp.get("sub_title", ""),
+                        "test_code":       "",
+                    })
+
+            enriched_testdetails.append({
+                # From combined testdetails
+                "test_id":              test_id,
+                "value":                td.get("value"),
+                "remarks":              td.get("remarks"),
+                "comment":              td.get("comment"),
+                "verified_by":          td.get("verified_by"),
+                "approve":              td.get("approve"),
+                "approve_time":         td.get("approve_time"),
+                "dispatch":             td.get("dispatch"),
+                "dispatch_time":        td.get("dispatch_time"),
+                "approve_by":           td.get("approve_by"),
+                "device_id":            device_id,
+
+                # From MongoDB core_testdetails
+                "testname":             mongo_test.get("test_name")             if mongo_test else td.get("testname"),
+                "test_code":            mongo_test.get("hms_testcode")          if mongo_test else None,
+                "department":           mongo_test.get("department")            if mongo_test else td.get("department"),
+                "specimen_type":        mongo_test.get("specimen_type")         if mongo_test else None,
+                "unit":                 mongo_test.get("unit")                  if mongo_test else None,
+                "method":               mongo_test.get("method")                if mongo_test else None,
+                "reference_range":      mongo_test.get("reference_range")       if mongo_test else None,
+                "MRP":                  mongo_test.get("MRP")                   if mongo_test else None,
+                "collection_container": mongo_test.get("collection_container")  if mongo_test else None,
+                "TAT_Time":             mongo_test.get("TAT_Time")              if mongo_test else None,
+                "NABL":                 mongo_test.get("NABL")                  if mongo_test else False,
+
+                # ✅ Enriched parameters with values
+                "parameters":           enriched_parameters,
+            })
+        # ===============================
+        # 4️⃣ GET PATIENT INFO FROM LOCAL DB
+        # ===============================
+        billing = Billing.objects.filter(barcode=barcode).first()
+        patient_id = billing.patient_id if billing else None
+        patient = Patient.objects.filter(patient_id=patient_id).first() if patient_id else None
+
+        record_date = mongo_register.get("date") if mongo_register else date
+
+        # ===============================
+        # 5️⃣ FINAL RESPONSE
+        # ===============================
         return Response({
             "franchise_id": franchise_id,
-            "date": str(test_record.get("date")),
-            "barcode": barcode,
-            "patient_id": patient_id,
-            "patientname": patient_name,
-            "test_data": {"data": [patient_details]}
+            "date":         record_date or date,
+            "barcode":      barcode,
+            "patient_id":   patient_id,
+            "patientname":  getattr(patient, "patientname", None),
+            "age":          getattr(patient, "age", None),
+            "gender":       getattr(patient, "gender", None),
+            "phone":        getattr(patient, "phone", None),
+            "address":      getattr(patient, "address", None),
+            "refby":        getattr(patient, "refby", "SELF"),
+            "branch":       franchise_id,
+            "test_data": {
+                "data": [{
+                    "barcode":     barcode,
+                    "date":        record_date or date,
+                    "testdetails": enriched_testdetails  # ✅ All 4 tests
+                }]
+            }
         })
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return Response({"error": str(e)}, status=500)
-    
+
+        
 
 @api_view(["PATCH"])
 def cancel_tests(request):
@@ -3123,5 +3299,6 @@ def export_accounts_csv(request):
 
     except Exception as e:
         return Response({"error": str(e)}, status=500)
+    
 
 
