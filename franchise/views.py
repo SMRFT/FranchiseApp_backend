@@ -2319,24 +2319,32 @@ def test_cancel_request(request):
     try:
         patient_id = request.data.get("patient_id")
         created_date_str = request.data.get("created_date")
+        barcode = request.data.get("barcode")
         test_ids = request.data.get("test_ids", [])
 
-        if not patient_id or not created_date_str:
+        if not patient_id:
             return Response(
-                {"error": "patient_id and created_date are required"},
+                {"error": "patient_id is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        created_date = parse_datetime(created_date_str)
-        if not created_date:
+        created_date = parse_datetime(created_date_str) if created_date_str else None
+        if created_date and created_date.tzinfo is not None:
+            created_date = created_date.replace(tzinfo=None)
+
+        if not created_date and not barcode:
             return Response(
-                {"error": "Invalid created_date format"},
+                {"error": "Either barcode or valid created_date is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        billing = franchise_collection.find_one(
-            {"patient_id": patient_id, "created_date": created_date}
-        )
+        query = {"patient_id": patient_id}
+        if barcode:
+            query["barcode"] = barcode
+        else:
+            query["created_date"] = created_date
+
+        billing = franchise_collection.find_one(query)
         if not billing:
             return Response(
                 {"error": "Billing record not found"},
