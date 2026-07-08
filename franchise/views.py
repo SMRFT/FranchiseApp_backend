@@ -33,8 +33,8 @@ from bson.json_util import dumps, loads
 from dotenv import load_dotenv
 
 
-from .models import Franchise
-from .serializers import FranchiseSerializer
+from .models import Franchise,FranchiseLocation, BarcodeRange,barcodestock
+from .serializers import FranchiseSerializer,FranchiseLocationSerializer, BarcodestockSerializer
 load_dotenv()
 
 @csrf_exempt
@@ -43,6 +43,7 @@ load_dotenv()
 @parser_classes([MultiPartParser])
 def register_franchise(request):
     data = request.data.copy()
+    print("Received data:", data)  # Debugging line
 
     # Get files from request
     aadhaar_file = request.FILES.get('aadhaar_proof')
@@ -50,6 +51,7 @@ def register_franchise(request):
     agreement_file = request.FILES.get('agreement_proof')
     franchise_photo_file = request.FILES.get('franchise_photo')
     user_id  = data.get('auth-user-id')
+    print("User ID from request:", user_id)  # Debugging line
     # MongoDB connection
     mongo_url = os.getenv("MONGO_URL")
     client = MongoClient(mongo_url)
@@ -234,7 +236,7 @@ def reset_franchise_password(request):
         client = MongoClient(mongo_url)
         db = client["franchise"]
         user_collection = db["franchise_user"]
-        franchise_collection = db["franchise_franchise"]  # ✅ fixed typo
+        franchise_collection = db["franchise_franchise"] 
 
         try:
             user = user_collection.find_one({
@@ -1163,6 +1165,8 @@ def update_test_status(request):
             client.close()
 
 
+
+
 # Updated get_cancel_requested_tests function to exclude already processed tests
 @csrf_exempt
 def get_cancel_requested_tests(request):
@@ -1212,12 +1216,7 @@ def update_cancel_status(request):
     """
     Approve or Reject a Cancel Accepted test
     """
-    
-    mongo_url = os.getenv("MONGO_URL")
-    client = MongoClient(mongo_url)
-    db = client["franchise"]
-    franchise_collection = db["franchise_billing"]
-    franchise_revenue_collection = db["franchise_franchisemonthlyrevenue"] 
+
     if request.method != "POST":
         return JsonResponse({"error": "Only POST allowed"}, status=405)
 
@@ -1236,6 +1235,7 @@ def update_cancel_status(request):
         client = MongoClient(mongo_url)
         db = client["franchise"]
         franchise_collection = db["franchise_billing"]
+        franchise_revenue_collection = db["franchise_franchisemonthlyrevenue"]
 
         patient = franchise_collection.find_one({"patient_id": patient_id})
         if not patient:
@@ -1280,51 +1280,80 @@ def update_cancel_status(request):
             # Get test MRP and discount percentage
             test_mrp = float(cancelled_test.get("MRP", 0))
             discount_percentage = float(cancelled_test.get("discountPercentage", 0))
-            
+
             # Calculate discounted amount
             discount_amount = (test_mrp * discount_percentage) / 100
             final_amount = test_mrp - discount_amount
-            
+
             # 2. Update billing table - minus the amount from total_amount and net_amount
+            # (pipeline update so it works whether these are Decimal128, double, or string)
             franchise_collection.update_one(
                 {"patient_id": patient_id},
-                {
-                    "$inc": {
-                        "total": -final_amount,
-                        "netAmount": -final_amount
+                [
+                    {
+                        "$set": {
+                            "total": {
+                                "$subtract": [
+                                    {"$toDouble": {"$ifNull": ["$total", 0]}},
+                                    final_amount
+                                ]
+                            },
+                            "netAmount": {
+                                "$subtract": [
+                                    {"$toDouble": {"$ifNull": ["$netAmount", 0]}},
+                                    final_amount
+                                ]
+                            }
+                        }
                     }
-                }
+                ]
             )
-            
+
             # 3. Update franchisemonthlyrevenue table
             franchise_id = patient.get("franchise_id")
             current_date = datetime.utcnow()
             month = current_date.month
             year = current_date.year
-            
+
             if franchise_id:
                 # Calculate revenue shares (assuming equal split, adjust as needed)
-                franchise_share = final_amount * 0.5  # 50% to franchise
-                franchisor_share = final_amount * 0.5  # 50% to franchisor
-                
+                franchise_share = final_amount * 0.5   # 50% to franchise
+                franchiser_share = final_amount * 0.5  # 50% to franchiser (matches DB field name)
+
                 franchise_revenue_collection.update_one(
                     {
                         "franchise_id": franchise_id,
                         "month": month,
                         "year": year
                     },
-                    {
-                        "$inc": {
-                            "franchise_share": -franchise_share,
-                            "franchisor_share": -franchisor_share,
-                            "total_revenue": -final_amount
+                    [
+                        {
+                            "$set": {
+                                "franchise_share": {
+                                    "$subtract": [
+                                        {"$toDouble": {"$ifNull": ["$franchise_share", 0]}},
+                                        franchise_share
+                                    ]
+                                },
+                                "franchiser_share": {
+                                    "$subtract": [
+                                        {"$toDouble": {"$ifNull": ["$franchiser_share", 0]}},
+                                        franchiser_share
+                                    ]
+                                },
+                                "total_revenue": {
+                                    "$subtract": [
+                                        {"$toDouble": {"$ifNull": ["$total_revenue", 0]}},
+                                        final_amount
+                                    ]
+                                }
+                            }
                         }
-                    }
+                    ]
                 )
 
         # Save back (double encode again to match your schema)
         updated_testdetails = json.dumps(testdetails)  # single dump
-
 
         franchise_collection.update_one(
             {"patient_id": patient_id},
@@ -1346,11 +1375,324 @@ def update_cancel_status(request):
         if "client" in locals():
             client.close()
 
+import os
+from bson.decimal128 import Decimal128
+from datetime import datetime
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from pymongo import MongoClient
+
+@csrf_exempt
+def month_end_calculation(request):
+    mongo_url = os.getenv("GLOBAL_DB_HOST")
+    client = MongoClient(mongo_url)
+    db = client["franchise"]
+
+    def safe_float(value):
+        """Safely convert Decimal128, string, or numeric types to float"""
+        if isinstance(value, Decimal128):
+            return float(value.to_decimal())
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # Handle POST request - can be for all or single franchise
+    if request.method == "POST":
+        try:
+            body = json.loads(request.body) if request.body else {}
+            franchise_id = body.get("franchise_id")
+            month = body.get("month")
+            year = body.get("year")
+        except json.JSONDecodeError:
+            franchise_id = None
+            month = None
+            year = None
+
+        # If specific franchise, month, year provided - close that one
+        if franchise_id and month and year:
+            monthly_doc = db["franchise_franchisemonthlyrevenue"].find_one({
+                "franchise_id": franchise_id,
+                "month": month,
+                "year": year
+            })
+            wallet_doc = db["franchise_wallet"].find_one({"franchise_id": franchise_id})
+
+            if monthly_doc and wallet_doc:
+                total_revenue = safe_float(monthly_doc.get("total_revenue", 0))
+                franchiser_share = safe_float(monthly_doc.get("franchise_share", 0))
+                wallet_balance = safe_float(wallet_doc.get("balance", 0))
+                calculated_value = wallet_balance - (total_revenue - franchiser_share)
+
+                # Update wallet
+                db["franchise_wallet"].update_one(
+                    {"franchise_id": franchise_id},
+                    {
+                        "$set": {
+                            "balance": calculated_value,
+                            "updated_date": datetime.utcnow()
+                        }
+                    }
+                )
+
+                # Mark as closed
+                db["franchise_franchisemonthlyrevenue"].update_one(
+                    {"franchise_id": franchise_id, "month": month, "year": year},
+                    {
+                        "$set": {
+                            "status": "closed",
+                            "closed_date": datetime.utcnow()
+                        }
+                    }
+                )
+
+                message = f"Franchise {franchise_id} closed successfully for {month}/{year}"
+            else:
+                message = "Franchise or wallet not found"
+        else:
+            # Close all active franchises
+            franchise_ids = db["franchise_franchisemonthlyrevenue"].distinct("franchise_id")
+            
+            for fid in franchise_ids:
+                monthly_doc = db["franchise_franchisemonthlyrevenue"].find_one(
+                    {"franchise_id": fid},
+                    sort=[("created_date", -1)]
+                )
+                
+                # Only process if status is active
+                if monthly_doc and monthly_doc.get("status") == "active":
+                    wallet_doc = db["franchise_wallet"].find_one({"franchise_id": fid})
+                    
+                    if wallet_doc:
+                        total_revenue = safe_float(monthly_doc.get("total_revenue", 0))
+                        franchiser_share = safe_float(monthly_doc.get("franchise_share", 0))
+                        wallet_balance = safe_float(wallet_doc.get("balance", 0))
+                        calculated_value = wallet_balance - (total_revenue - franchiser_share)
+
+                        # Update wallet
+                        db["franchise_wallet"].update_one(
+                            {"franchise_id": fid},
+                            {
+                                "$set": {
+                                    "balance": calculated_value,
+                                    "updated_date": datetime.utcnow()
+                                }
+                            }
+                        )
+
+                        # Mark as closed
+                        db["franchise_franchisemonthlyrevenue"].update_one(
+                            {
+                                "franchise_id": fid, 
+                                "month": monthly_doc.get("month"), 
+                                "year": monthly_doc.get("year")
+                            },
+                            {
+                                "$set": {
+                                    "status": "closed",
+                                    "closed_date": datetime.utcnow()
+                                }
+                            }
+                        )
+
+            message = "All active franchises closed successfully"
+
+    # Get all data with status
+    franchise_ids = db["franchise_franchisemonthlyrevenue"].distinct("franchise_id")
+    results = []
+
+    for franchise_id in franchise_ids:
+        monthly_doc = db["franchise_franchisemonthlyrevenue"].find_one(
+            {"franchise_id": franchise_id},
+            sort=[("created_date", -1)]
+        )
+        wallet_doc = db["franchise_wallet"].find_one({"franchise_id": franchise_id})
+
+        if not monthly_doc or not wallet_doc:
+            continue
+
+        total_revenue = safe_float(monthly_doc.get("total_revenue", 0))
+        franchiser_share = safe_float(monthly_doc.get("franchise_share", 0))
+        wallet_balance = safe_float(wallet_doc.get("balance", 0))
+        calculated_value = wallet_balance - (total_revenue - franchiser_share)
+
+        results.append({
+            "franchise_id": franchise_id,
+            "month": monthly_doc.get("month"),
+            "year": monthly_doc.get("year"),
+            "total_revenue": total_revenue,
+            "franchise_share": franchiser_share,
+            "wallet_balance": wallet_balance,
+            "current_wallet_balance": calculated_value,
+            "status": monthly_doc.get("status", "active")  # Default to active if not set
+        })
+
+    # Return response
+    if request.method == "POST":
+        return JsonResponse({"message": message, "data": results}, safe=False)
+    return JsonResponse({"data": results}, safe=False)
 
 
 
 
+"""
+View for POST /post_loaction/
+
+Creates a new franchise location document. Mirrors the pattern in your
+snippet (request.data.copy(), auth-user-id -> created_by) and adds:
+
+  1. Auto-incrementing location_id, based on the highest existing one
+     (e.g. last is SDMF025 -> new one is SDMF026).
+  2. created_by / created_date and lastmodified_by / lastmodified_date.
+  3. is_active defaults to True.
+
+Adjust the import of `location_collection` to match wherever you already
+open your Mongo collection elsewhere in the app.
+"""
+
+import re
+from datetime import datetime, timezone
+
+from rest_framework import status
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+
+from .dbcollection import location_collection  
+
+LOCATION_PREFIX = "SDMF"
 
 
+def generate_next_location_id():
+    """
+    Finds the highest existing location_id with the SDMF prefix and
+    returns the next one in the sequence, preserving zero-padding
+    (SDMF025 -> SDMF026).
+
+    Note: this does a find + increment, which is fine for normal usage
+    but isn't atomic. If two requests can hit this at the exact same
+    moment, you'd want a dedicated counters collection with
+    find_one_and_update($inc) instead to avoid a duplicate ID.
+    """
+    last_location = location_collection.find_one(
+        {"location_id": {"$regex": f"^{LOCATION_PREFIX}"}},
+        sort=[("location_id", -1)],
+    )
+
+    if not last_location:
+        return f"{LOCATION_PREFIX}001"
+
+    match = re.search(r"(\d+)$", last_location["location_id"])
+    last_number = int(match.group(1)) if match else 0
+    padding = len(match.group(1)) if match else 3
+
+    return f"{LOCATION_PREFIX}{str(last_number + 1).zfill(padding)}"
 
 
+@api_view(['POST'])
+def post_loaction(request):
+    serializer = FranchiseLocationSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    user_id = request.user.id
+    now = datetime.now(timezone.utc)
+    validated = serializer.validated_data
+
+    # Build the model instance in memory only — do NOT call .save() on it,
+    # there's no real table backing it (Meta.managed = False).
+    location = FranchiseLocation(
+        location_id=generate_next_location_id(),
+        Cluster_Name=validated['Cluster_Name'],
+        District=validated['District'],
+        Covered_Areas=validated.get('Covered_Areas', ''),
+        is_active=validated.get('is_active', True),
+        created_by=user_id,
+        created_date=now,
+        lastmodified_by=user_id,
+        lastmodified_date=now,
+    )
+
+    result = location_collection.insert_one(location.to_mongo_dict())
+    response_data = location.to_mongo_dict()
+    response_data["_id"] = str(result.inserted_id)
+
+    return Response(response_data, status=status.HTTP_201_CREATED)
+
+
+from datetime import datetime, timedelta
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+from django.utils.dateparse import parse_date
+from django.utils import timezone
+
+
+@api_view(['GET', 'PUT'])
+def getandupdatebarcode(request):
+    if request.method == 'GET':
+        date_param = request.GET.get('date')
+        if date_param:
+            selected_date = parse_date(date_param)
+            if not selected_date:
+                return Response(
+                    {'error': 'Invalid date format. Use YYYY-MM-DD.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            selected_date = timezone.localdate()
+
+        # Use a datetime range instead of __date lookup — __date needs
+        # datetime_cast_date_sql(), which the mongo backend doesn't implement.
+        tz = timezone.get_current_timezone()
+        start_of_day = timezone.make_aware(
+            datetime.combine(selected_date, datetime.min.time()), tz
+        )
+        end_of_day = start_of_day + timedelta(days=1)
+
+        queryset = barcodestock.objects.filter(
+            date__gte=start_of_day,
+            date__lt=end_of_day
+        ).order_by('-date')
+
+        serializer = BarcodestockSerializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    if request.method == 'PUT':
+        barcode_id = request.data.get('barcode_id')
+        if not barcode_id:
+            return Response(
+                {'error': 'barcode_id is required to update.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            existing = barcodestock.objects.get(barcode_id=barcode_id)
+        except barcodestock.DoesNotExist:
+            return Response(
+                {'error': 'No record found for this barcode_id.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        update_fields = {
+            'startbarcode': request.data.get('startbarcode', existing.startbarcode),
+            'endbarcode': request.data.get('endbarcode', existing.endbarcode),
+            'modifedby': request.data.get('modifedby', ''),
+            'modifieddatetime': timezone.now(),
+        }
+
+        # Atomic update by barcode_id — avoids Django's save()/_do_update()
+        # insert-fallback quirk on the mongo backend, which was silently
+        # creating a new document instead of updating the existing one.
+        updated_count = barcodestock.objects.filter(barcode_id=barcode_id).update(**update_fields)
+
+        if not updated_count:
+            return Response(
+                {'error': 'Update failed — no matching document.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        instance = barcodestock.objects.get(barcode_id=barcode_id)
+        return Response(
+            {'message': 'Barcode stock updated successfully', 'data': BarcodestockSerializer(instance).data},
+            status=status.HTTP_200_OK
+        )

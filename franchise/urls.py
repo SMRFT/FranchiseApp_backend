@@ -7,7 +7,7 @@ urlpatterns = [
     path('franchise/validate-token/', views.validate_reset_token, name='validate_reset_token'),
     path('toggle-franchise-status/<str:franchise_id>/', views.toggle_franchise_status),#employee toggle
     path('getlocations/', views.get_all_franchise_locations, name='get_all_franchise_locations'),#toggle
-    path('getactivelocations/', views.get_inactive_franchise_locations, name='get_active_franchise_locations'),#dropdown
+    path('getactivelocations/', views.get_inactive_franchise_locations, name='get_active_franchise_locations'),
     path('get-franchise/', views.get_registered_franchise, name='get_registered_franchise'),
     path('get-file/<str:file_id>/', views.get_file, name='get_file'),
     path('updatestatus/<str:location_id>/', views.update_franchise_status, name='update_franchise_status'),
@@ -24,6 +24,9 @@ urlpatterns = [
     path('cancel-requested/', views.get_cancel_requested_tests, name='cancel-requested'),
     path('update-test-status/', views.update_test_status, name='update_test_status'),
     path('update_cancel_status/', views.update_cancel_status, name='update_cancel_status'),
+    path('monthend/', views.month_end_calculation, name='month_end_calculation'),
+    path('post_loaction/', views.post_loaction, name='post_loaction'),
+    path('getandupdatebarcode/', views.getandupdatebarcode, name='getandupdatebarcode'),
 
-    
+
 ]

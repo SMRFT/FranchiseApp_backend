@@ -21,7 +21,7 @@ class Franchise(models.Model):
     initialpayment = models.CharField(max_length=100)
     is_active = models.BooleanField(default=False)
 
-    createdby = models.CharField(max_length=100)
+    createdby = models.CharField(max_length=100 ,blank=True, null=True)
     lastmodifiedby = models.CharField(max_length=100, blank=True, null=True)
     createddate = models.DateTimeField(auto_now_add=True)
     lastmodifieddate = models.DateTimeField(auto_now=True)
@@ -84,12 +84,31 @@ class Wallet(models.Model):
         return f"Wallet for {self.franchise.franchise_name} - ₹{self.balance}"
 
 
-
 class barcodestock(models.Model):
+    barcode_id = models.CharField(max_length=100, unique=True, blank=True)
     startbarcode = models.CharField(max_length=100)
     endbarcode = models.CharField(max_length=100)
+    date = models.DateTimeField(auto_now_add=True)
     createddate = models.DateTimeField(auto_now_add=True)
     createdby = models.CharField(max_length=100)
+    modifedby = models.CharField(max_length=100, null=True, blank=True)
+    modifieddatetime = models.DateTimeField(auto_now=True)
+    def save(self, *args, **kwargs):
+        if not self.barcode_id:
+            last_obj = barcodestock.objects.order_by('-createddate').first()
+
+            if last_obj and last_obj.barcode_id:
+                try:
+                    last_number = int(last_obj.barcode_id.replace("BC", ""))
+                    next_number = last_number + 1
+                except:
+                    next_number = 1
+            else:
+                next_number = 1
+
+            self.barcode_id = f"BC{next_number:05d}"
+
+        super().save(*args, **kwargs)
 
 from bson import ObjectId
 from django.db import models
@@ -150,3 +169,47 @@ class Payments(models.Model):
 
     class Meta:
         ordering = ['-created']
+
+
+
+from django.db import models
+
+
+class FranchiseLocation(models.Model):
+    """
+    Schema-only representation of a document in the `franchise_locations`
+    Mongo collection. Actual reads/writes go through pymongo
+    (location_collection), not Django's ORM — Mongo isn't configured as
+    a Django DATABASE here. This model exists so ModelSerializer can
+    validate against real fields instead of a hand-rolled Serializer.
+    Never call .save()/.delete() on instances of this model.
+    """
+    location_id = models.CharField(max_length=20, unique=True, blank=True)
+    Cluster_Name = models.CharField(max_length=200)
+    District = models.CharField(max_length=200)
+    Covered_Areas = models.CharField(max_length=500, blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    created_by = models.CharField(max_length=50)
+    created_date = models.DateTimeField(auto_now_add=True)
+    lastmodified_by = models.CharField(max_length=50, blank=True, null=True)
+    lastmodified_date = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False  # Django won't create/migrate a table for this
+        app_label = 'franchise'
+
+    def __str__(self):
+        return f"{self.location_id} - {self.Cluster_Name}"
+
+    def to_mongo_dict(self):
+        return {
+            "Cluster_Name": self.Cluster_Name,
+            "District": self.District,
+            "Covered_Areas": self.Covered_Areas,
+            "is_active": self.is_active,
+            "created_by": self.created_by,
+            "created_date": self.created_date,
+            "lastmodified_by": self.lastmodified_by,
+            "lastmodified_date": self.lastmodified_date,
+            "location_id": self.location_id,
+        }
